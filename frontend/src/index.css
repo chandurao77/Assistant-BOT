@@ -1,0 +1,253 @@
+:root {
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  color: #15231d;
+  background:
+    radial-gradient(circle at top, rgba(255, 210, 145, 0.6), transparent 30%),
+    linear-gradient(180deg, #f5efe3 0%, #e6f0e8 100%);
+  line-height: 1.5;
+  font-weight: 400;
+  color-scheme: light;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  width: min(1120px, calc(100% - 2rem));
+  margin: 0 auto;
+  padding: 2rem 0 3rem;
+}
+
+.hero-card,
+.workspace-card {
+  background: rgba(255, 252, 247, 0.82);
+  border: 1px solid rgba(21, 35, 29, 0.08);
+  border-radius: 24px;
+  box-shadow: 0 24px 60px rgba(21, 35, 29, 0.08);
+  backdrop-filter: blur(12px);
+}
+
+.hero-card {
+  padding: 2rem;
+}
+
+.workspace-card {
+  margin-top: 1.5rem;
+  padding: 2rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #8b5e34;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  max-width: 14ch;
+  margin-bottom: 1rem;
+  font-size: clamp(2.5rem, 5vw, 4.5rem);
+  line-height: 0.95;
+}
+
+h2 {
+  margin-bottom: 0;
+  font-size: 1.6rem;
+}
+
+.lede {
+  max-width: 60ch;
+  font-size: 1.05rem;
+  color: rgba(21, 35, 29, 0.78);
+}
+
+.status-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+
+.status-card,
+.response-panel,
+.source-card {
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(21, 35, 29, 0.08);
+  border-radius: 18px;
+}
+
+.status-card {
+  padding: 1rem 1.1rem;
+}
+
+.status-card span,
+.response-header span {
+  display: block;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: rgba(21, 35, 29, 0.56);
+}
+
+.status-card strong {
+  display: block;
+  margin: 0.35rem 0;
+  font-size: 1.4rem;
+}
+
+.status-card small {
+  color: rgba(21, 35, 29, 0.68);
+}
+
+.panel-heading {
+  margin-bottom: 1.5rem;
+}
+
+.chat-form {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.chat-form label {
+  font-weight: 600;
+}
+
+.chat-form textarea {
+  width: 100%;
+  padding: 1rem;
+  border: 1px solid rgba(21, 35, 29, 0.16);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.9);
+  resize: vertical;
+}
+
+.chat-form button {
+  justify-self: start;
+  padding: 0.85rem 1.2rem;
+  border: 0;
+  border-radius: 999px;
+  background: #183c31;
+  color: #fffaf1;
+  cursor: pointer;
+  transition: transform 120ms ease, opacity 120ms ease;
+}
+
+.chat-form button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.chat-form button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.response-panel {
+  margin-top: 1.5rem;
+  padding: 1.25rem;
+}
+
+.response-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.response-header h3 {
+  margin-bottom: 0;
+}
+
+.response-copy,
+.muted-text,
+.error-text,
+.conversation-tag {
+  margin-bottom: 0.75rem;
+}
+
+.muted-text {
+  color: rgba(21, 35, 29, 0.62);
+}
+
+.error-text {
+  color: #a43424;
+}
+
+.conversation-tag {
+  font-size: 0.95rem;
+  color: rgba(21, 35, 29, 0.72);
+}
+
+.sources-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.source-card {
+  padding: 0.9rem 1rem;
+}
+
+.source-card strong {
+  display: block;
+}
+
+.source-card span {
+  display: block;
+  margin: 0.25rem 0 0.5rem;
+  color: rgba(21, 35, 29, 0.62);
+  font-size: 0.95rem;
+}
+
+.source-card p {
+  margin-bottom: 0;
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    width: min(100% - 1rem, 1120px);
+    padding-top: 1rem;
+  }
+
+  .hero-card,
+  .workspace-card {
+    padding: 1.25rem;
+  }
+
+  .status-row {
+    grid-template-columns: 1fr;
+  }
+
+  .response-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
