@@ -1,23 +1,24 @@
-"Please do a complete verification and fix of ATLAS answer quality. We recently made these changes: replaced LLM reranker with keyword+vector scoring (0.6 keyword + 0.4 vector), disabled dual-query fallback when reranker active, and fixed 100% score display bug. But answer quality still has issues.
-STEP 1 — DIAGNOSE current problems:
-Run these 5 test queries against the live ATLAS instance and record: sources returned, scores shown, whether answer is correct, whether sources match the question topic.
-Query 1: "What is MPA gateway activation?"
-Query 2: "What is the retry policy for SQS messages?"
-Query 3: "How do I set up the development environment?"
-Query 4: "What are the API rate limits?"
-Query 5: Ask something completely outside the docs like "What is the weather today?" — this should return low confidence or no answer.
-Report what score each source gets, how many sources returned, and whether the top source actually matches the question.
-STEP 2 — CHECK these specific issues in the code:
-In reranker.py — verify the combined score formula (0.6 keyword + 0.4 vector) is actually writing back to src.score correctly. Check that stop words list is comprehensive enough — short words like "what", "how", "the", "is", "are", "do", "i" should all be excluded from keyword matching so query terms like "what is MPA" only matches on "MPA" not "what" and "is".
-In rag.py — verify RETRIEVAL_SCORE_THRESHOLD is being applied correctly. Check that sources below threshold are filtered BEFORE reranking not after. Verify the final top 5 sources passed to LLM are the highest scored ones.
-In vector_store.py — verify Qdrant cosine similarity score is preserved in the source payload and not being overwritten before reranker runs.
-STEP 3 — FIX these issues:
-Fix 1 — Keyword scoring improvement: expand stop words list to include all common English words that add no search value. Add exact phrase bonus — if the exact question phrase appears in the chunk, boost score by 0.2. Add title match bonus — if query terms appear in the page title, boost score by 0.15.
-Fix 2 — Tune scoring weights: change from 0.6 keyword + 0.4 vector to 0.35 keyword + 0.65 vector. Semantic meaning should dominate, keyword matching should assist.
-Fix 3 — Score threshold: ensure RETRIEVAL_SCORE_THRESHOLD=0.40 is applied. Any source with combined score below 0.40 should be filtered out. If ALL sources are below 0.40 — return a low confidence message to user instead of hallucinating.
-Fix 4 — Source count: cap maximum sources shown to user at 5. If fewer than 3 sources pass the threshold — show confidence warning on the answer.
-Fix 5 — Display score: confirm the score shown in citation cards is the combined reranker score (0.0 to 1.0) multiplied by 100 for percentage display. Never show raw BM25 scores.
-STEP 4 — RUN all existing tests:
-Run python -m pytest backend/tests/ -v and confirm all tests pass. If any tests fail due to the scoring changes — update the test assertions to match the new scoring formula. Target: all tests passing.
-STEP 5 — RUN the same 5 test queries again and compare before vs after scores. Show me a table of Query, Before Score, After Score, Sources Match Question (yes/no).
-Show me each file change before applying it."
+"Fix ATLAS source relevance — currently sources shown contain matching keywords but don't directly answer the user question. I want ONLY sources that directly answer the question to be shown.
+PROBLEM 1 — Source ranking wrong:
+The current scoring formula is 0.35 keyword + 0.65 vector. This is better but still surfaces tangentially related documents. The ranking needs to prioritize documents where the answer to the question actually EXISTS in the chunk text — not just documents that mention related words.
+Fix: Add an answer-presence check to the scoring. For each retrieved chunk — check if the chunk text contains a direct answer pattern for the question type. For HOW questions — chunk should contain steps or instructions. For WHAT questions — chunk should contain a definition or explanation. For WHERE/WHEN questions — chunk should contain specific location or time information. Add 0.3 bonus to chunks that pass the answer-presence check. This makes chunks that actually CONTAIN the answer rank above chunks that merely MENTION related terms.
+PROBLEM 2 — Too many marginally related sources shown:
+Currently showing up to 5 sources even when only 1-2 are directly relevant. The threshold of 0.40 is still too low — marginal sources sneak through.
+Fix: Implement a score gap filter. After reranking — calculate the score gap between the top source and each subsequent source. If a source scores more than 0.25 below the top source score — cut off there. This means if top source is 85% and next is 55% — only show the top source. The list stops where there is a significant drop in relevance. Never show more than 5 sources. Never show sources below absolute threshold of 0.45.
+PROBLEM 3 — Source URL not matching the best answer:
+The source link shown in the citation card must point to the exact Confluence page that contains the answer — not a parent page or related page. Verify in vector_store.py that the URL stored in Qdrant payload is the direct page URL including the page ID — not just the space URL. If URL is missing or only has space key — fix the ingestion to store the full direct page URL in the chunk payload.
+PROBLEM 4 — Verify source title matches content:
+Check that the page_title stored in Qdrant payload matches the actual Confluence page title that contains the answer chunk. If chunks from a page called 'MPA Gateway Guide' are being retrieved but showing title '2020 Status Wiki' — there is a metadata mismatch in the ingestion pipeline. Fix the chunking in text_splitter.py and ingest.py to ensure each chunk carries the correct parent page title and URL.
+IMPLEMENTATION ORDER:
+1. Fix vector_store.py — verify URL and title in payload
+2. Fix reranker.py — add answer-presence bonus and score gap filter
+3. Fix chat.py — raise absolute threshold to 0.45, implement score gap cutoff
+4. Run all tests — target 456/456 passing
+5. Test these 5 queries and show before/after source titles and URLs:
+— "What is MPA gateway activation?"
+— "How do I set up development environment?"
+— "What are the API rate limits?"
+— "What is the SQS retry policy?"
+— "How do I request Confluence access?"
+Show me the source TITLE and URL for each query before and after fix.
+Show me all file changes before applying them."
