@@ -1,0 +1,23 @@
+"Please do a complete verification and fix of ATLAS answer quality. We recently made these changes: replaced LLM reranker with keyword+vector scoring (0.6 keyword + 0.4 vector), disabled dual-query fallback when reranker active, and fixed 100% score display bug. But answer quality still has issues.
+STEP 1 — DIAGNOSE current problems:
+Run these 5 test queries against the live ATLAS instance and record: sources returned, scores shown, whether answer is correct, whether sources match the question topic.
+Query 1: "What is MPA gateway activation?"
+Query 2: "What is the retry policy for SQS messages?"
+Query 3: "How do I set up the development environment?"
+Query 4: "What are the API rate limits?"
+Query 5: Ask something completely outside the docs like "What is the weather today?" — this should return low confidence or no answer.
+Report what score each source gets, how many sources returned, and whether the top source actually matches the question.
+STEP 2 — CHECK these specific issues in the code:
+In reranker.py — verify the combined score formula (0.6 keyword + 0.4 vector) is actually writing back to src.score correctly. Check that stop words list is comprehensive enough — short words like "what", "how", "the", "is", "are", "do", "i" should all be excluded from keyword matching so query terms like "what is MPA" only matches on "MPA" not "what" and "is".
+In rag.py — verify RETRIEVAL_SCORE_THRESHOLD is being applied correctly. Check that sources below threshold are filtered BEFORE reranking not after. Verify the final top 5 sources passed to LLM are the highest scored ones.
+In vector_store.py — verify Qdrant cosine similarity score is preserved in the source payload and not being overwritten before reranker runs.
+STEP 3 — FIX these issues:
+Fix 1 — Keyword scoring improvement: expand stop words list to include all common English words that add no search value. Add exact phrase bonus — if the exact question phrase appears in the chunk, boost score by 0.2. Add title match bonus — if query terms appear in the page title, boost score by 0.15.
+Fix 2 — Tune scoring weights: change from 0.6 keyword + 0.4 vector to 0.35 keyword + 0.65 vector. Semantic meaning should dominate, keyword matching should assist.
+Fix 3 — Score threshold: ensure RETRIEVAL_SCORE_THRESHOLD=0.40 is applied. Any source with combined score below 0.40 should be filtered out. If ALL sources are below 0.40 — return a low confidence message to user instead of hallucinating.
+Fix 4 — Source count: cap maximum sources shown to user at 5. If fewer than 3 sources pass the threshold — show confidence warning on the answer.
+Fix 5 — Display score: confirm the score shown in citation cards is the combined reranker score (0.0 to 1.0) multiplied by 100 for percentage display. Never show raw BM25 scores.
+STEP 4 — RUN all existing tests:
+Run python -m pytest backend/tests/ -v and confirm all tests pass. If any tests fail due to the scoring changes — update the test assertions to match the new scoring formula. Target: all tests passing.
+STEP 5 — RUN the same 5 test queries again and compare before vs after scores. Show me a table of Query, Before Score, After Score, Sources Match Question (yes/no).
+Show me each file change before applying it."
