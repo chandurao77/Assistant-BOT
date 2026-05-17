@@ -1,1 +1,207 @@
-Add 
+> *"Build a complete production-grade application called PolicyPilot — a Vectorless RAG document intelligence platform powered by PageIndex. This is a Comcast internal tool for querying uploaded documents using reasoning-based retrieval instead of vector similarity search.*
+>
+> *PROJECT NAME: PolicyPilot*
+> *TAGLINE: Reason over your documents, not just search them*
+> *REPO NAME: policy-pilot*
+>
+> *TECH STACK:*
+>
+> *Backend: Python 3.11+ with FastAPI. Async throughout using asyncio. PageIndex library from VectifyAI/PageIndex for tree building and reasoning-based retrieval. LiteLLM for multi-provider LLM support with config switch. PostgreSQL 16 via SQLAlchemy async + asyncpg for all data storage. Store PageIndex tree JSON in PostgreSQL JSONB column for fast querying inside tree structures. Alembic for database migrations. Redis 7 for caching full tree index structures so expensive tree builds are not repeated — 24 hour TTL. Pydantic v2 for all schemas. python-dotenv for config. SSE (Server-Sent Events) for streaming responses. python-multipart for file uploads. pypdf and python-docx and markdown for document parsing — PDF, DOCX, and MD all supported. JWT authentication with bcrypt password hashing. Rate limiting via slowapi.*
+>
+> *Frontend: React 18 with TypeScript and Vite. Tailwind CSS for styling. shadcn/ui for components. Two layout modes: (1) Dark chat UI similar to ChatGPT — sidebar with conversation history, main chat area with SSE streaming, source citations showing which tree node was used. (2) Dashboard with file manager — upload documents, see all uploaded docs with status Processing/Ready/Error, view the generated tree structure visually, delete documents. Toggle between layouts via header button. Dark mode only. Lucide React for icons. React Router for navigation.*
+>
+> *Infrastructure: Podman Compose with these services: backend FastAPI on port 8000, frontend nginx on port 3000, PostgreSQL 16 on port 5432 with persistent volume, Redis 7 on port 6379. No vector database needed — PageIndex uses no embeddings. Single podman-compose.yml and podman-compose.dev.yml for hot reload. run.ps1 for Windows, run.sh for Mac/Linux. Makefile for common tasks.*
+>
+> *LLM CONFIGURATION — All 3 with config switch: Add LLM_PROVIDER env var with three options. Option 1 flowcontext: uses Comcast internal gateway at context.flow.cnap.comcast.net with model gpt-5-mini. Set FLOWCONTEXT_BASE_URL and FLOWCONTEXT_API_KEY in .env. Option 2 openai: uses OpenAI directly with gpt-4o. Set OPENAI_API_KEY in .env. Option 3 ollama: uses local Ollama at localhost:11434 with llama3.1:8b model. No API key needed. All three go through LiteLLM so switching is one config change. Add /api/health endpoint that shows which LLM provider is active and connected.*
+>
+> *CORE FEATURES:*
+>
+> *Feature 1 — Document Upload and Tree Building: POST /api/documents/upload accepts PDF, DOCX, and MD files up to 50MB. On upload: save file to disk in UPLOAD_DIR, extract text using pypdf for PDF and python-docx for DOCX and markdown lib for MD, run PageIndex tree builder to generate hierarchical JSON tree structure, store tree as JSONB in PostgreSQL documents table, cache full tree JSON in Redis with 24-hour TTL, update document status to Ready. Show progress during tree building via SSE status endpoint GET /api/documents/{id}/status. Store in PostgreSQL: document_id, filename, file_type, file_size, upload_time, status, page_count, node_count, tree_json JSONB, created_by.*
+>
+> *Feature 2 — Reasoning-Based Q&A: POST /api/chat/stream accepts question and document_ids list. For each query: load tree from Redis cache or rebuild from PostgreSQL JSONB if cache miss, run PageIndex reasoning loop where LLM reads tree summaries then reasons which nodes to fetch then fetches actual content then repeats if needed, stream final answer via SSE token by token. Each response includes: answer text, reasoning trace showing which nodes were visited and why, source citations with node_id and node_title and page_range and confidence. Never uses vector similarity — pure LLM reasoning over tree structure.*
+>
+> *Feature 3 — Tree Visualization: GET /api/documents/{id}/tree returns the full hierarchical tree JSON from PostgreSQL JSONB. Frontend renders this as a collapsible interactive tree in the dashboard — show node titles and page ranges and summaries on hover. Highlight nodes that were visited during the last query. This shows users exactly how PageIndex navigated their document.*
+>
+> *Feature 4 — Multi-Document Query: Allow users to select multiple documents and query across all of them simultaneously. PageIndex loads all selected trees and LLM reasons across multiple document trees at once. Show which document and which node each part of the answer came from.*
+>
+> *Feature 5 — Reasoning Trace Display: Every answer shows a collapsible Reasoning Trace panel in the UI. Shows step by step: Step 1 Read tree index, question about X. Step 2 Node N004 summary mentions X, fetching. Step 3 Found partial answer, cross-reference to N007. Step 4 Complete answer assembled. This is the full audit trail that vector RAG cannot provide.*
+>
+> *Feature 6 — Conversation History: Store all conversations in PostgreSQL. Left sidebar shows conversation list with document name and first question. Click to restore full conversation. Rename and delete conversations. 6-turn context window passed to PageIndex for follow-up questions.*
+>
+> *Feature 7 — Dashboard File Manager: Full document management dashboard with drag-and-drop upload area, document list showing name and size and type and status and node count and upload date, click document to see tree visualization, delete document, re-process document. Status badges: Processing yellow spinner, Ready green, Error red. Sort by date and name and size. Search documents by name.*
+>
+> *Feature 8 — Source Citations: Every answer shows source cards below the response. Each card shows: document name, node title, page range such as pages 12-15, node summary excerpt, reasoning step that led there. Clicking a citation highlights that node in the tree visualization. Never show similarity percentage — show reasoning explanation instead.*
+>
+> *Feature 9 — Confidence and Quality Indicators: After each answer show: Documents searched count, Nodes visited count, Reasoning steps count, Answer completeness which is Complete or Partial or Low confidence based on whether LLM reasoning loop found satisfactory answer. If LLM reasoning loop needed more than 5 hops flag as complex query.*
+>
+> *Feature 10 — Export: Export conversation as PDF or Markdown including full reasoning traces.*
+>
+> *AUTH: Simple JWT auth. Register and login and logout. Store users in PostgreSQL. Bcrypt password hashing. JWT tokens with 24-hour expiry. Auth middleware on all /api routes except /health and /auth.*
+>
+> *SECURITY: Input validation via Pydantic v2 with 2000 char max on questions. File type validation — reject anything not PDF or DOCX or MD. File size limit 50MB. Rate limiting 10 requests per minute per IP on chat endpoint. Content guardrail — reject questions containing prompt injection patterns. JWT on all routes. CORS configured for localhost:3000.*
+>
+> *DATABASE SCHEMA — PostgreSQL tables:*
+> *users: user_id UUID primary key, email unique, password_hash, created_at, last_login.*
+> *documents: document_id UUID primary key, filename, file_type, file_size, page_count, node_count, status enum Processing Ready Error, tree_json JSONB, upload_time, created_by UUID foreign key users.*
+> *conversations: conversation_id UUID primary key, title, created_at, updated_at, created_by UUID foreign key users.*
+> *messages: message_id UUID primary key, conversation_id foreign key, role enum user assistant, content text, reasoning_trace JSONB, source_citations JSONB, document_ids UUID array, created_at.*
+> *document_conversation: join table linking conversations to documents.*
+>
+> *FOLDER STRUCTURE — create this exact structure:*
+> *policy-pilot/*
+> *├── backend/*
+> *│   ├── app/*
+> *│   │   ├── main.py — FastAPI app + lifespan + startup checks*
+> *│   │   ├── config.py — pydantic settings all env vars*
+> *│   │   ├── database.py — async SQLAlchemy engine + session*
+> *│   │   ├── api/routes/*
+> *│   │   │   ├── chat.py — SSE streaming Q&A endpoint*
+> *│   │   │   ├── documents.py — upload list delete tree status*
+> *│   │   │   ├── conversations.py — list rename delete restore*
+> *│   │   │   ├── auth.py — register login logout refresh*
+> *│   │   │   └── health.py — health check + LLM provider status*
+> *│   │   ├── services/*
+> *│   │   │   ├── pageindex_service.py — tree building + reasoning retrieval loop*
+> *│   │   │   ├── llm_service.py — LiteLLM wrapper with FlowContext OpenAI Ollama switch*
+> *│   │   │   ├── document_service.py — file parsing PDF DOCX MD text extraction*
+> *│   │   │   ├── cache_service.py — Redis tree caching get set invalidate*
+> *│   │   │   ├── auth_service.py — JWT creation validation bcrypt*
+> *│   │   │   └── guardrail_service.py — input validation injection detection*
+> *│   │   └── models/*
+> *│   │       ├── schemas.py — all pydantic request response models*
+> *│   │       └── db_models.py — SQLAlchemy ORM models all tables*
+> *│   ├── tests/*
+> *│   │   ├── conftest.py — pytest fixtures async client db*
+> *│   │   ├── test_documents.py — upload parsing tree building*
+> *│   │   ├── test_chat.py — SSE streaming reasoning trace*
+> *│   │   ├── test_auth.py — register login JWT*
+> *│   │   ├── test_pageindex.py — tree building mock*
+> *│   │   ├── test_llm.py — all 3 providers mocked*
+> *│   │   ├── test_cache.py — Redis cache hit miss*
+> *│   │   └── test_guardrail.py — injection detection*
+> *│   ├── alembic/*
+> *│   │   └── versions/001_initial_schema.py — all 5 tables*
+> *│   ├── requirements.txt*
+> *│   └── Containerfile — Python 3.11 slim Podman compatible*
+> *├── frontend/*
+> *│   ├── src/*
+> *│   │   ├── components/*
+> *│   │   │   ├── Chat/*
+> *│   │   │   │   ├── ChatContainer.tsx — root chat component wires all hooks*
+> *│   │   │   │   ├── MessageList.tsx — auto scroll aria-live*
+> *│   │   │   │   ├── MessageItem.tsx — renders markdown code blocks*
+> *│   │   │   │   ├── ChatInput.tsx — input bar send button stop*
+> *│   │   │   │   ├── SourceCitations.tsx — source cards with node info*
+> *│   │   │   │   └── ReasoningTrace.tsx — collapsible step by step trace*
+> *│   │   │   ├── Dashboard/*
+> *│   │   │   │   ├── FileManager.tsx — full document management view*
+> *│   │   │   │   ├── DocumentCard.tsx — single doc card with status*
+> *│   │   │   │   ├── UploadZone.tsx — drag drop file upload*
+> *│   │   │   │   ├── TreeViewer.tsx — interactive collapsible tree*
+> *│   │   │   │   └── StatusBadge.tsx — Processing Ready Error badge*
+> *│   │   │   ├── Layout/*
+> *│   │   │   │   ├── Header.tsx — logo layout toggle dark mode*
+> *│   │   │   │   └── Sidebar.tsx — conversation list document selector*
+> *│   │   │   └── Auth/*
+> *│   │   │       ├── LoginForm.tsx*
+> *│   │   │       └── RegisterForm.tsx*
+> *│   │   ├── hooks/*
+> *│   │   │   ├── useChat.ts — SSE streaming atomic dispatch*
+> *│   │   │   ├── useDocuments.ts — upload list delete status polling*
+> *│   │   │   ├── useConversations.ts — list rename delete*
+> *│   │   │   ├── useTreeViewer.ts — tree expand collapse highlight*
+> *│   │   │   └── useAuth.ts — login logout JWT storage*
+> *│   │   ├── services/*
+> *│   │   │   ├── api.ts — SSE streaming client base config*
+> *│   │   │   ├── documentsApi.ts — document CRUD tree fetch*
+> *│   │   │   ├── conversationsApi.ts — conversation CRUD*
+> *│   │   │   └── authApi.ts — login register refresh*
+> *│   │   ├── types/index.ts — all TypeScript interfaces*
+> *│   │   └── main.tsx — app entry ErrorBoundary wraps App*
+> *│   ├── Containerfile — node build nginx*
+> *│   └── nginx.conf — proxy config SSE safe*
+> *├── podman-compose.yml — production all 4 services*
+> *├── podman-compose.dev.yml — hot reload mounted volumes*
+> *├── run.ps1 — Windows one-command start*
+> *├── run.sh — Mac/Linux one-command start*
+> *├── Makefile — build start stop logs test clean*
+> *├── .env.example — all config options with comments*
+> *├── .gitignore*
+> *├── README.md — full documentation*
+> *└── AGENTS.md — architecture and service guide*
+>
+> *ENV VARIABLES — create complete .env.example with comments:*
+> *LLM_PROVIDER=flowcontext*
+> *FLOWCONTEXT_BASE_URL=https://context.flow.cnap.comcast.net*
+> *FLOWCONTEXT_API_KEY=your_key_here*
+> *FLOWCONTEXT_MODEL=gpt-5-mini*
+> *OPENAI_API_KEY=your_key_here*
+> *OPENAI_MODEL=gpt-4o*
+> *OLLAMA_BASE_URL=http://localhost:11434*
+> *OLLAMA_MODEL=llama3.1:8b*
+> *PAGEINDEX_MAX_PAGES_PER_NODE=10*
+> *PAGEINDEX_MAX_TOKENS_PER_NODE=20000*
+> *PAGEINDEX_TOC_CHECK_PAGES=20*
+> *JWT_SECRET=your_secret_here*
+> *JWT_EXPIRY_HOURS=24*
+> *REDIS_URL=redis://redis:6379*
+> *POSTGRES_HOST=postgres*
+> *POSTGRES_PORT=5432*
+> *POSTGRES_DB=policypilot*
+> *POSTGRES_USER=policypilot*
+> *POSTGRES_PASSWORD=your_password_here*
+> *DATABASE_URL=postgresql+asyncpg://policypilot:your_password_here@postgres:5432/policypilot*
+> *MAX_FILE_SIZE_MB=50*
+> *RATE_LIMIT_PER_MINUTE=10*
+> *UPLOAD_DIR=./data/uploads*
+> *CORS_ORIGINS=http://localhost:3000*
+>
+> *PODMAN COMPOSE — podman-compose.yml must have exactly these 4 services:*
+> *backend: build from backend Containerfile, port 8000, depends on postgres and redis, volume for uploads, env from .env*
+> *postgres: image postgres:16-alpine, port 5432, volume postgres_data persisted, POSTGRES_DB and POSTGRES_USER and POSTGRES_PASSWORD from env*
+> *redis: image redis:7-alpine, port 6379, volume redis_data persisted*
+> *frontend: build from frontend Containerfile, port 3000, depends on backend*
+>
+> *TESTS — write pytest tests targeting 80% coverage:*
+> *test_documents.py: upload PDF success, upload DOCX success, upload MD success, reject invalid file type, reject oversized file, tree building creates correct node structure, tree stored in PostgreSQL JSONB, tree cached in Redis.*
+> *test_chat.py: SSE stream returns tokens, reasoning trace included in response, source citations have node_id and title and page_range, multi-document query returns sources from multiple docs, follow-up question uses conversation context.*
+> *test_auth.py: register creates user in PostgreSQL, login returns JWT, invalid password rejected, expired JWT rejected, protected route requires auth.*
+> *test_pageindex.py: tree builder called with correct params, reasoning loop visits correct nodes, cache miss triggers rebuild, cache hit skips rebuild.*
+> *test_llm.py: FlowContext provider configured correctly, OpenAI provider configured correctly, Ollama provider configured correctly, provider switch via env var works.*
+> *test_cache.py: tree stored in Redis on first build, tree retrieved from Redis on second query, expired cache triggers rebuild.*
+> *test_guardrail.py: prompt injection detected and rejected, normal question passes, oversized question rejected.*
+>
+> *README.md must include: project overview explaining vectorless RAG vs vector RAG, tech stack table, quick start with podman-compose up, all three LLM provider setup instructions with exact env vars, ASCII architecture diagram showing all 4 services, API endpoint reference table, how PageIndex reasoning works with step by step example, comparison table PolicyPilot vs traditional vector RAG.*
+>
+> *AGENTS.md must include: service by service architecture guide, how pageindex_service.py works, how LLM provider switching works, how tree caching works, how to add a new document type, how to add a new LLM provider.*
+>
+> *BUILD ORDER — follow this exact sequence:*
+> *Step 1: Create complete folder structure and all empty files first — show me the full file tree.*
+> *Step 2: backend config.py and database.py and db_models.py and schemas.py.*
+> *Step 3: alembic initial migration for all 5 tables.*
+> *Step 4: backend document_service.py — PDF DOCX MD text extraction.*
+> *Step 5: backend pageindex_service.py — tree building and reasoning retrieval loop.*
+> *Step 6: backend llm_service.py — LiteLLM wrapper all 3 providers.*
+> *Step 7: backend cache_service.py — Redis tree caching.*
+> *Step 8: backend auth_service.py — JWT bcrypt.*
+> *Step 9: backend guardrail_service.py — injection detection.*
+> *Step 10: backend all API routes — chat documents conversations auth health.*
+> *Step 11: backend main.py — app startup lifespan.*
+> *Step 12: backend tests — all test files with conftest.py.*
+> *Step 13: frontend types/index.ts and all service files.*
+> *Step 14: frontend Auth components.*
+> *Step 15: frontend Dashboard components — FileManager DocumentCard UploadZone TreeViewer StatusBadge.*
+> *Step 16: frontend Chat components — ChatContainer MessageList MessageItem ChatInput SourceCitations ReasoningTrace.*
+> *Step 17: frontend Layout — Header Sidebar.*
+> *Step 18: frontend hooks — useChat useDocuments useConversations useTreeViewer useAuth.*
+> *Step 19: frontend main.tsx and App.tsx with routing.*
+> *Step 20: Containerfiles for backend and frontend.*
+> *Step 21: podman-compose.yml and podman-compose.dev.yml.*
+> *Step 22: run.ps1 and run.sh and Makefile.*
+> *Step 23: .env.example with all variables and comments.*
+> *Step 24: README.md and AGENTS.md.*
+> *Step 25: Final integration test — start all services, upload a PDF, verify tree builds in PostgreSQL, ask a question, verify SSE streaming works, verify reasoning trace appears, verify source citations show correct node info.*
+>
+> *Start now with Step 1 — create the complete folder structure and show me the full file tree before writing any code."*
+
+
