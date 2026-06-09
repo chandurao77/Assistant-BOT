@@ -1,15 +1,7 @@
-Answer these 3 questions:
-
-1. Does QueryQuokka rank logs by
-   severity (ERROR first) or by
-   time (chronological)?
-
-2. How many log lines get sent
-   to the LLM per investigation?
-
-3. Does the wrong answer quote
-   a specific log line, or is it
-   vague?
-
-Your answers tell us which of
-the 5 causes is yours ✅
+Fix QueryQuokka analyzer accuracy. The bug: it selects ‘up to 20 errors by order they appear’ instead of by relevance — so when the real root cause error appears after the first 20 errors, it gets filtered out and the LLM confidently reports a wrong-but-specific cause.
+Fix 1 — Replace order-based error selection with relevance scoring. Score every error in the time window by: severity (FATAL +1.0, EXCEPTION +0.8, ERROR +0.7, WARN +0.3), rarity (errors appearing once score higher than repeated errors — rare errors are more likely root causes), proximity to incident spike timestamp (closer = higher), first-occurrence bonus (+0.3 if first of its type). Take top 20 by score, not first 20 by order.
+Fix 2 — Guarantee inclusion of: the first ERROR/FATAL in the window, the last ERROR before the incident spike, and any error that appears exactly once (unique errors). Fill remaining slots by score.
+Fix 3 — Deduplicate repeated identical errors before selection. Collapse ‘ConnectionTimeout x47’ into one entry with a count, so repeated symptoms do not crowd out unique root-cause errors.
+Fix 4 — Add causality reasoning to the analyzer prompt: instruct the LLM to identify which error occurred FIRST chronologically as the likely root cause, and treat errors after it as potential cascading symptoms. Ask it to distinguish root cause from symptoms.
+Fix 5 — Apply the same relevance scoring to state-transition events and warnings, not just errors. Currently all are order/chronological based.
+Show me the current error selection code first, then show me the changes before applying.”
