@@ -1,7 +1,16 @@
-Fix QueryQuokka analyzer accuracy. The bug: it selects ‘up to 20 errors by order they appear’ instead of by relevance — so when the real root cause error appears after the first 20 errors, it gets filtered out and the LLM confidently reports a wrong-but-specific cause.
-Fix 1 — Replace order-based error selection with relevance scoring. Score every error in the time window by: severity (FATAL +1.0, EXCEPTION +0.8, ERROR +0.7, WARN +0.3), rarity (errors appearing once score higher than repeated errors — rare errors are more likely root causes), proximity to incident spike timestamp (closer = higher), first-occurrence bonus (+0.3 if first of its type). Take top 20 by score, not first 20 by order.
-Fix 2 — Guarantee inclusion of: the first ERROR/FATAL in the window, the last ERROR before the incident spike, and any error that appears exactly once (unique errors). Fill remaining slots by score.
-Fix 3 — Deduplicate repeated identical errors before selection. Collapse ‘ConnectionTimeout x47’ into one entry with a count, so repeated symptoms do not crowd out unique root-cause errors.
-Fix 4 — Add causality reasoning to the analyzer prompt: instruct the LLM to identify which error occurred FIRST chronologically as the likely root cause, and treat errors after it as potential cascading symptoms. Ask it to distinguish root cause from symptoms.
-Fix 5 — Apply the same relevance scoring to state-transition events and warnings, not just errors. Currently all are order/chronological based.
-Show me the current error selection code first, then show me the changes before applying.”
+Tell Claude Code:
+
+"Before applying, fix 3 things:
+1. Use rep.severity.value for severity 
+   weight, not string matching on message 
+   text — a message containing 'exception' 
+   might be INFO level.
+2. Sort all_errors by ts_epoch BEFORE 
+   computing the midpoint spike fallback — 
+   currently midpoint of unsorted list is 
+   a random timestamp.
+3. The first_bonus is always 0.3 because 
+   you iterate unique dict keys — either 
+   remove it or make it only apply to the 
+   genuinely earliest error in the window.
+Then apply all fixes."
