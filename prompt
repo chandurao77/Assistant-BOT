@@ -1,133 +1,15 @@
-Build a GitHub Copilot Extension called prcheck. This is a GitHub Copilot Chat skill that team members invoke using @prcheck in GitHub Copilot Chat inside VS Code or GitHub.com. It performs deep domain-specific code review on top of what GitHub Copilot already does automatically.
-PROJECT NAME: prcheck
-EXTENSION NAME: @prcheck
-REPO NAME: prcheck
-PURPOSE: Deep AI-powered PR review skill for GitHub Copilot Chat — security, architecture, performance, bugs, and domain-specific rules for all languages
-HOW IT WORKS:
-Developer opens a PR on GitHub. GitHub Copilot already runs its standard review automatically. Developer then opens Copilot Chat and types @prcheck review this PR. The prcheck extension fetches the PR diff from GitHub API using the current repo context, runs deep multi-layer analysis, and streams back a structured review with severity levels and fix suggestions directly inside Copilot Chat.
-TECH STACK:
-Runtime: Node.js 20+ with TypeScript. GitHub Copilot Extensions SDK — @github/copilot-extensions for building the skill. GitHub API via Octokit REST client to fetch PR diff and file contents and metadata. Express.js for the extension server endpoint. GitHub App authentication for API access. Deployed as a simple Node.js server that GitHub Copilot Chat calls as an agent. Zod for input validation. dotenv for config.
-EXTENSION COMMANDS — @prcheck supports these commands:
-@prcheck review — Full deep review of current PR covering all categories.
-@prcheck security — Security-only deep scan of the PR diff.
-@prcheck performance — Performance and efficiency analysis only.
-@prcheck architecture — Architecture, design patterns, coupling, cohesion analysis.
-@prcheck bugs — Bug detection and logic error analysis only.
-@prcheck summary — Executive summary of PR changes in plain English.
-@prcheck fix [issue] — Suggest specific fix for a mentioned issue.
-@prcheck help — Show all available commands with examples.
-REVIEW CATEGORIES — for each PR diff analyze all of these:
-Category 1 — Security Vulnerabilities:
-SQL injection risks. XSS vulnerabilities. Hardcoded secrets, API keys, passwords, tokens. Insecure dependencies. Authentication and authorization bypasses. Sensitive data exposed in logs. OWASP Top 10 violations. Insecure deserialization. Path traversal risks. Race conditions in auth flows.
-Category 2 — Code Quality and Best Practices:
-SOLID principles violations. DRY violations — duplicated logic. Functions longer than 50 lines. Deeply nested code more than 4 levels. Magic numbers and magic strings without constants. Missing error handling. Poor naming conventions. Dead code and unreachable code. Missing or inadequate comments on complex logic. God classes and god functions.
-Category 3 — Performance Issues:
-N+1 query problems. Missing database indexes based on query patterns. Synchronous blocking operations that should be async. Unnecessary loops inside loops. Memory leaks — unclosed connections, event listeners not removed. Large payloads not paginated. Missing caching for expensive operations. String concatenation in loops instead of builders.
-Category 4 — Bug Detection:
-Null and undefined dereference without null checks. Off-by-one errors in loops. Integer overflow risks. Incorrect boolean logic. Missing edge case handling — empty arrays, zero values, negative numbers. Incorrect error propagation — errors swallowed silently. Race conditions in concurrent code. Wrong variable used in similar-looking assignments.
-Category 5 — Architecture:
-Business logic leaking into controllers or views. Direct database calls from wrong layers. Circular dependencies. Tight coupling between modules. Missing abstraction — hardcoded implementation instead of interface. Violation of separation of concerns. Missing dependency injection. Wrong use of design patterns.
-LANGUAGE SUPPORT — detect language from file extension and apply language-specific rules:
-Java: check for proper Spring annotations, transactional boundaries, thread safety, connection pool usage, checked exception handling.
-Python: check for proper async await usage, type hints missing, mutable default arguments, global state.
-TypeScript/JavaScript: check for proper Promise handling, missing await, type any usage, memory leaks in React hooks, missing dependency arrays.
-Go: check for goroutine leaks, error handling patterns, proper defer usage.
-SQL: check for missing WHERE clauses on updates, missing indexes, N+1 patterns.
-Any other language: apply general best practices for security quality performance bugs architecture.
-REVIEW OUTPUT FORMAT — stream back structured markdown:
-Start with an executive summary: one paragraph describing what this PR does and overall risk level which is Critical or High or Medium or Low.
-Then show findings grouped by severity:
-CRITICAL — must fix before merge: each finding shows emoji fire, file name and line number, issue title, explanation of why it is dangerous, exact code snippet from the diff, suggested fix as code snippet.
-HIGH — should fix before merge: each finding shows emoji warning, file name and line number, issue title, explanation, code snippet, suggested fix.
-MEDIUM — consider fixing: each finding shows emoji yellow circle, issue title, explanation, suggestion.
-LOW — nice to have: each finding shows emoji blue circle, issue title, quick tip.
-End with a scorecard table showing: Security score out of 10, Quality score out of 10, Performance score out of 10, Overall score out of 10, Recommendation which is Approve or Request Changes or Block.
-FOLDER STRUCTURE — create this exact structure:
-prcheck/
-├── src/
-│   ├── index.ts — Express server entry point GitHub Copilot agent endpoint
-│   ├── extension.ts — Copilot extension handler parses commands routes to analyzers
-│   ├── github/
-│   │   ├── client.ts — Octokit GitHub API client PR diff fetcher
-│   │   └── parser.ts — parse PR diff into structured file and hunk and line objects
-│   ├── analyzers/
-│   │   ├── index.ts — orchestrator runs all analyzers combines results
-│   │   ├── security.ts — security vulnerability analyzer
-│   │   ├── quality.ts — code quality and best practices analyzer
-│   │   ├── performance.ts — performance issue analyzer
-│   │   ├── bugs.ts — bug detection analyzer
-│   │   └── architecture.ts — architecture and design analyzer
-│   ├── languages/
-│   │   ├── detector.ts — detect language from file extension
-│   │   ├── java.ts — Java and Spring Boot specific rules
-│   │   ├── python.ts — Python specific rules
-│   │   ├── typescript.ts — TypeScript and JavaScript specific rules
-│   │   └── generic.ts — generic rules for all other languages
-│   ├── formatter/
-│   │   └── markdown.ts — format findings as structured markdown with severity groups
-│   └── types/
-│       └── index.ts — all TypeScript interfaces Finding Severity Review PR diff
-├── tests/
-│   ├── analyzers/
-│   │   ├── security.test.ts
-│   │   ├── quality.test.ts
-│   │   ├── performance.test.ts
-│   │   ├── bugs.test.ts
-│   │   └── architecture.test.ts
-│   ├── github/
-│   │   ├── client.test.ts
-│   │   └── parser.test.ts
-│   └── formatter/
-│       └── markdown.test.ts
-├── .github/
-│   └── copilot-instructions.md — custom instructions for prcheck behavior
-├── package.json
-├── tsconfig.json
-├── .env.example
-├── .gitignore
-└── README.md
-ENV VARIABLES in .env.example:
-GITHUB_APP_ID=your_app_id
-GITHUB_APP_PRIVATE_KEY=your_private_key
-GITHUB_WEBHOOK_SECRET=your_webhook_secret
-PORT=3000
-MAX_DIFF_SIZE_LINES=5000
-MAX_FILES_PER_REVIEW=50
-GITHUB APP SETUP — README.md must include exact step by step:
-Step 1: Create GitHub App at github.com/settings/apps/new. App name: prcheck. Homepage URL: your server URL. Callback URL: your server URL slash callback. Webhook URL: your server URL slash webhook. Permissions needed: Pull requests read, Contents read, Issues write for PR comments. Subscribe to events: Pull request.
-Step 2: Generate private key and download PEM file.
-Step 3: Install app on your organization or repo.
-Step 4: Set env vars and start server.
-Step 5: In VS Code open Copilot Chat and type @prcheck help to verify.
-HOW TEAM USES IT — README.md must show these examples:
-Open PR on GitHub. Open Copilot Chat in VS Code with Ctrl+Shift+I. Type @prcheck review to get full review. Type @prcheck security to check only security. Type @prcheck fix SQL injection in UserService.java to get specific fix suggestion. Type @prcheck summary to get plain English PR description for non-technical stakeholders.
-TESTS — write Jest tests for:
-security.test.ts: detects SQL injection in Java, detects hardcoded API key, detects XSS in TypeScript, passes clean code with no findings.
-quality.test.ts: detects function over 50 lines, detects DRY violation, detects magic number, passes clean code.
-performance.test.ts: detects N+1 query pattern, detects missing async, detects loop inside loop.
-bugs.test.ts: detects null dereference, detects swallowed error, detects off-by-one.
-architecture.test.ts: detects business logic in controller, detects direct DB call from wrong layer.
-parser.test.ts: parses unified diff format correctly, extracts file names and line numbers and hunks.
-markdown.test.ts: formats critical findings with fire emoji, formats scorecard table correctly.
-README.md must include:
-What prcheck does and how it differs from standard Copilot review. Installation steps for GitHub App. Team usage guide with command examples. Review output format with example screenshot description. How scoring works. Supported languages list. How to add custom rules for your codebase.
-BUILD ORDER:
-Step 1: Create folder structure and all empty files — show complete file tree.
-Step 2: types/index.ts — all TypeScript interfaces.
-Step 3: github/parser.ts — unified diff parser.
-Step 4: github/client.ts — Octokit PR fetcher.
-Step 5: languages/detector.ts and all language files.
-Step 6: analyzers/security.ts.
-Step 7: analyzers/quality.ts.
-Step 8: analyzers/performance.ts.
-Step 9: analyzers/bugs.ts.
-Step 10: analyzers/architecture.ts.
-Step 11: analyzers/index.ts — orchestrator.
-Step 12: formatter/markdown.ts.
-Step 13: extension.ts — command router.
-Step 14: index.ts — Express server Copilot agent endpoint.
-Step 15: All tests.
-Step 16: .env.example and tsconfig.json and package.json.
-Step 17: README.md with full setup guide.
-Step 18: Integration test — mock a PR diff with 3 security issues and 2 performance issues and verify @prcheck review returns findings with correct severity levels and scorecard.
-Start with Step 1 — create the complete folder structure and show me the full file tree before writing any code."
+Answer these 3 questions:
+
+1. Does QueryQuokka rank logs by
+   severity (ERROR first) or by
+   time (chronological)?
+
+2. How many log lines get sent
+   to the LLM per investigation?
+
+3. Does the wrong answer quote
+   a specific log line, or is it
+   vague?
+
+Your answers tell us which of
+the 5 causes is yours ✅
