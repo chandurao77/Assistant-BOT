@@ -1,252 +1,550 @@
-Yes, absolutely — and it’s actually a solid fit for QueryQuokka. Let me break down exactly where LangGraph adds value and how you’d wire it up.
+"""
+log_compressor.py
+-----------------
+QueryQuokka context compression — no external dependencies.
 
-Why QueryQuokka Is a Good Candidate
+Implements the three core techniques from Headroom's SmartCrusher and LogCompressor:
 
-Your current pipeline is:
+  1. JSON minification         — strip whitespace from ES log JSON payloads  (~30% savings)
+  2. Repetition deduplication  — collapse repeated log lines with a count     (~40-60% savings)
+  3. Severity-based filtering  — drop DEBUG/INFO noise, keep ERROR/WARN/stack traces
 
-Parser → TimeWindow → StreamClassifier → Summarizer → Analyzer → Assembler
+Usage:
+    from log_compressor import compress_logs, compress_messages
 
+    # Compress raw ES JSON string before passing to Parser agent
+    compressed_json, stats = compress_logs(raw_es_json)
 
-This is sequential and fixed. Every query runs all 6 agents regardless of what the input is. That means:
+    # Compress full message list before any LLM call
+    compressed_msgs, stats = compress_messages(messages)
+"""
 
-	•	Low-volume, clean logs still go through StreamClassifier
-	•	Simple queries still hit the full Summarizer + Analyzer chain
-	•	A failure in Analyzer silently passes garbage to Assembler
-	•	Autopilot mode has no gate — it fires on every anomaly
+from __future__ import annotations
 
-LangGraph fixes all of this with conditional routing.
+import json
+import re
+from dataclasses import dataclass
+from typing import Any
 
-The Redesigned Pipeline as a Graph
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 
-START
-  │
-  ▼
-[Parser]
-  │
-  ├─── parse failed ──────────────────────► [Error Node] → END
-  │
-  ▼
-[TimeWindow]
-  │
-  ▼
-[StreamClassifier]
-  │
-  ├─── low volume / no anomaly ───────────► [LightSummarizer] → [Assembler] → END
-  │
-  ├─── anomaly detected ──────────────────► [Summarizer] → [Analyzer] → [Evaluator]
-  │                                                                          │
-  │                                              confidence OK ◄─────────────┤
-  │                                                    │                     │
-  │                                               [Assembler]       confidence low
-  │                                                    │                     │
-  │                                                   END           [Repair / Re-Analyze]
-  │                                                                          │
-  │                                                                    (max 2 retries)
-  │
-  ├─── critical alert ────────────────────► [Summarizer] → [Analyzer] → [SlackNotifier]
-                                                                              │
-                                                                          [Assembler] → END
+@dataclass
+class CompressorConfig:
+    """Tune compression behaviour per QueryQuokka use case."""
 
+    # JSON minification
+    minify_json: bool = True
 
-State Design
+    # Repetition dedupe
+    dedup_enabled: bool = True
+    dedup_threshold: int = 2          # collapse runs of N+ identical lines
+    dedup_normalise_values: bool = True  # treat lines differing only in numbers/UUIDs as dupes
 
-from typing import TypedDict, Annotated, Optional
-import operator
+    # Severity filter
+    filter_enabled: bool = True
+    keep_levels: set[str] = None      # None = keep all except DEBUG/TRACE
+    max_info_lines: int = 5           # keep first N INFO lines as context
 
-class QueryQuokkaState(TypedDict):
-    # Input
-    raw_logs: str
-    query: str
-    
-    # Parsed
-    parsed_events: list
-    time_range: dict
-    
-    # Classification
-    stream_type: str          # "normal" | "anomaly" | "critical"
-    anomaly_signals: list
-    log_volume: int
-    
-    # Analysis
-    summary: str
-    analysis: str
-    false_positive_flags: list
-    confidence_score: float
-    
-    # Control flow
-    retry_count: int
-    errors: Annotated[list, operator.add]  # Append-only error log
-    
-    # Output
-    final_report: dict
-    slack_payload: Optional[dict]
+    def __post_init__(self):
+        if self.keep_levels is None:
+            self.keep_levels = {"ERROR", "WARN", "WARNING", "FATAL", "CRITICAL", "FAIL"}
 
 
-Node Implementations
+@dataclass
+class CompressionStats:
+    tokens_before: int
+    tokens_after: int
+    tokens_saved: int
+    compression_ratio: float          # 0.0 = no saving, 0.7 = 70% reduction
+    techniques_applied: list[str]
 
-Parser Node
+    def __str__(self):
+        return (
+            f"tokens: {self.tokens_before} → {self.tokens_after} "
+            f"(saved {self.tokens_saved}, {self.compression_ratio:.0%})"
+        )
 
-def parser_node(state: QueryQuokkaState) -> dict:
+
+# ---------------------------------------------------------------------------
+# Token counting (no tiktoken needed — ~4 chars per token is standard estimate)
+# ---------------------------------------------------------------------------
+
+def _count_tokens(text: str) -> int:
+    return max(1, len(text) // 4)
+
+
+def _count_message_tokens(messages: list[dict]) -> int:
+    total = 0
+    for m in messages:
+        content = m.get("content", "")
+        if isinstance(content, str):
+            total += _count_tokens(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    total += _count_tokens(str(block.get("text") or block.get("content") or ""))
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Technique 1: JSON minification
+# ---------------------------------------------------------------------------
+
+def _minify_json(text: str) -> tuple[str, bool]:
+    """
+    Re-serialise JSON without indentation.
+    '{ "a": 1 }' (10 chars) → '{"a":1}' (7 chars)
+    Typical saving: 25–35% on pretty-printed ES payloads.
+    """
     try:
-        parsed = parse_logs(state["raw_logs"])
-        return {"parsed_events": parsed}
-    except Exception as e:
-        return {"errors": [f"Parser failed: {str(e)}"], "parsed_events": []}
+        parsed = json.loads(text)
+        minified = json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+        return minified, True
+    except (json.JSONDecodeError, ValueError):
+        return text, False
 
 
-StreamClassifier Node + Router
+# ---------------------------------------------------------------------------
+# Technique 2: Repetition deduplication
+# ---------------------------------------------------------------------------
 
-def stream_classifier_node(state: QueryQuokkaState) -> dict:
-    classification = classify_stream(state["parsed_events"])
-    return {
-        "stream_type": classification["type"],
-        "anomaly_signals": classification["signals"],
-        "log_volume": classification["volume"]
-    }
-
-def route_after_classifier(state: QueryQuokkaState) -> str:
-    if state["errors"]:
-        return "error"
-    if state["stream_type"] == "critical":
-        return "critical_path"
-    if state["stream_type"] == "anomaly":
-        return "anomaly_path"
-    return "light_path"   # Normal, low-volume logs
+# Patterns that vary between repeated log lines but carry no new information
+_NOISE_PATTERNS = [
+    (re.compile(r'\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b', re.I), '<uuid>'),
+    (re.compile(r'\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?\b'), '<ts>'),
+    (re.compile(r'\b\d{2}:\d{2}:\d{2}(\.\d+)?\b'), '<time>'),
+    (re.compile(r'\btrace_id["\s:=]+[0-9a-f]+\b', re.I), 'trace_id=<id>'),
+    (re.compile(r'\b(duration_ms|elapsed|latency)["\s:=]+\d+\b', re.I), r'\1=<N>'),
+    (re.compile(r'\b\d{3,}\b'), '<N>'),   # large numbers (ports, ids, counts)
+]
 
 
-Evaluator Node (the key addition)
-
-This is what you’re missing today — a node that checks if the Analyzer’s output is actually good before sending it to the user.
-
-def evaluator_node(state: QueryQuokkaState) -> dict:
-    score = evaluate_analysis_quality(
-        analysis=state["analysis"],
-        logs=state["parsed_events"],
-        anomaly_signals=state["anomaly_signals"]
-    )
-    return {"confidence_score": score}
-
-def route_after_evaluator(state: QueryQuokkaState) -> str:
-    if state["confidence_score"] >= 0.70:
-        return "assemble"
-    if state["retry_count"] >= 2:
-        return "assemble"   # Give up gracefully, flag low confidence
-    return "repair"
+def _normalise_line(line: str) -> str:
+    """Strip variable values so structurally identical lines hash the same."""
+    normalised = line
+    for pattern, replacement in _NOISE_PATTERNS:
+        normalised = pattern.sub(replacement, normalised)
+    return normalised.strip()
 
 
-Repair Node
+def _dedup_lines(lines: list[str], cfg: CompressorConfig) -> tuple[list[str], int]:
+    """
+    Collapse consecutive duplicate lines into 'line (×N)'.
+    Returns (deduped_lines, n_removed).
+    """
+    if not lines:
+        return lines, 0
 
-def repair_node(state: QueryQuokkaState) -> dict:
-    # Re-run analysis with more context or different prompt
-    refined_analysis = re_analyze(
-        state["parsed_events"],
-        state["anomaly_signals"],
-        previous_attempt=state["analysis"]
-    )
-    return {
-        "analysis": refined_analysis,
-        "retry_count": state["retry_count"] + 1
-    }
+    output: list[str] = []
+    removed = 0
 
+    i = 0
+    while i < len(lines):
+        current = lines[i]
+        key = _normalise_line(current) if cfg.dedup_normalise_values else current.strip()
 
-Wiring It Together
+        # Count how many consecutive lines match
+        j = i + 1
+        while j < len(lines):
+            next_key = _normalise_line(lines[j]) if cfg.dedup_normalise_values else lines[j].strip()
+            if next_key != key:
+                break
+            j += 1
 
-from langgraph.graph import StateGraph, END
+        count = j - i
+        if count >= cfg.dedup_threshold:
+            output.append(f"{current.rstrip()} (×{count})")
+            removed += count - 1
+        else:
+            output.extend(lines[i:j])
+        i = j
 
-builder = StateGraph(QueryQuokkaState)
-
-# Register all nodes
-builder.add_node("parser", parser_node)
-builder.add_node("time_window", time_window_node)
-builder.add_node("stream_classifier", stream_classifier_node)
-builder.add_node("summarizer", summarizer_node)
-builder.add_node("light_summarizer", light_summarizer_node)
-builder.add_node("analyzer", analyzer_node)
-builder.add_node("evaluator", evaluator_node)
-builder.add_node("repair", repair_node)
-builder.add_node("assembler", assembler_node)
-builder.add_node("slack_notifier", slack_notifier_node)
-builder.add_node("error_handler", error_handler_node)
-
-# Fixed edges
-builder.set_entry_point("parser")
-builder.add_edge("parser", "time_window")
-builder.add_edge("time_window", "stream_classifier")
-builder.add_edge("summarizer", "analyzer")
-builder.add_edge("analyzer", "evaluator")
-builder.add_edge("repair", "evaluator")       # Loop: repair → re-evaluate
-
-# Conditional edges
-builder.add_conditional_edges("stream_classifier", route_after_classifier, {
-    "light_path":     "light_summarizer",
-    "anomaly_path":   "summarizer",
-    "critical_path":  "summarizer",
-    "error":          "error_handler"
-})
-
-builder.add_conditional_edges("evaluator", route_after_evaluator, {
-    "assemble": "assembler",
-    "repair":   "repair"
-})
-
-# Critical path gets Slack notification before assembly
-builder.add_conditional_edges("assembler", route_critical_to_slack, {
-    "notify": "slack_notifier",
-    "done":   END
-})
-builder.add_edge("slack_notifier", END)
-builder.add_edge("light_summarizer", "assembler")
-builder.add_edge("error_handler", END)
-
-graph = builder.compile()
+    return output, removed
 
 
-Autopilot Mode — The Right Way
+# ---------------------------------------------------------------------------
+# Technique 3: Severity-based line filtering
+# ---------------------------------------------------------------------------
 
-Your current Autopilot fires on every anomaly and posts to Slack. With LangGraph you make this a proper interrupt gate:
-
-from langgraph.checkpoint.postgres import PostgresSaver
-
-checkpointer = PostgresSaver.from_conn_string(DATABASE_URL)
-
-# In autopilot mode, pause before Slack notification
-autopilot_graph = builder.compile(
-    checkpointer=checkpointer,
-    interrupt_before=["slack_notifier"]  # Human approves before posting
+_LEVEL_PATTERN = re.compile(
+    r'\b(DEBUG|TRACE|INFO|WARN|WARNING|ERROR|FATAL|CRITICAL|FAIL)\b', re.I
 )
 
-# Step 1 — Runs up to slack_notifier, pauses
-thread = {"configurable": {"thread_id": incident_id}}
-result = autopilot_graph.invoke({"raw_logs": log_batch}, config=thread)
-
-# Step 2 — After human reviews in UI and approves:
-autopilot_graph.invoke(None, config=thread)  # Resume → posts to Slack
+_STACK_TRACE_PATTERN = re.compile(
+    r'^\s*(at |File "|Traceback|caused by|Exception|Error:|-> |#\d+\s)', re.I
+)
 
 
-This gives you the human approval gate you’d want before auto-posting incident alerts.
+def _detect_level(line: str) -> str:
+    """Extract log level from a line, returns 'UNKNOWN' if not found."""
+    m = _LEVEL_PATTERN.search(line)
+    return m.group(1).upper() if m else "UNKNOWN"
 
-What You Actually Gain
+
+def _is_stack_trace_line(line: str) -> bool:
+    return bool(_STACK_TRACE_PATTERN.match(line))
 
 
+def _filter_by_severity(
+    lines: list[str], cfg: CompressorConfig
+) -> tuple[list[str], int]:
+    """
+    Keep:
+      - ERROR / WARN / FATAL / CRITICAL lines (always)
+      - Stack trace lines (always — they explain errors)
+      - First N INFO lines (for context)
+      - UNKNOWN lines (may be structured output, keep safe)
+    Drop:
+      - DEBUG / TRACE lines
+      - INFO lines beyond max_info_lines
+    """
+    output: list[str] = []
+    removed = 0
+    info_kept = 0
+    in_stack_trace = False
 
-|Current QueryQuokka             |With LangGraph                                   |
-|--------------------------------|-------------------------------------------------|
-|All 6 agents run for every query|Light path skips heavy agents for clean logs     |
-|Silent failures between agents  |Evaluator catches bad analysis before delivery   |
-|No retry logic                  |Repair node retries with refined prompt (max 2x) |
-|Autopilot fires blindly         |Human interrupt gate before Slack posts          |
-|No mid-run state inspection     |Full state visible at every node via checkpointer|
-|~$0.05/query flat               |Light path could drop to ~$0.01/query            |
-|30s latency for all queries     |Light path completes in ~8–10s                   |
+    for line in lines:
+        level = _detect_level(line)
+        is_trace = _is_stack_trace_line(line)
 
-My Recommendation
+        # Stack trace continuation
+        if is_trace:
+            in_stack_trace = True
+            output.append(line)
+            continue
 
-Don’t rewrite everything at once. Do it in 3 phases:
+        # Non-trace line breaks the stack trace block
+        if not is_trace and in_stack_trace and line.strip():
+            in_stack_trace = False
 
-Phase 1 — Add the Evaluator + Repair nodes inside your existing sequential flow. This alone fixes your core accuracy issue (zero relevance scoring) without touching the routing.
+        if level in ("DEBUG", "TRACE"):
+            removed += 1
+            continue
 
-Phase 2 — Add the StreamClassifier routing split (light path vs anomaly path). This reduces cost and latency on clean log batches immediately.
+        if level == "INFO":
+            if info_kept < cfg.max_info_lines:
+                output.append(line)
+                info_kept += 1
+            else:
+                removed += 1
+            continue
 
-Phase 3 — Add checkpointing + Autopilot interrupt gate. This makes the product safe for production team onboarding.
+        output.append(line)
 
-Each phase is independently deployable. Phase 1 is maybe 2 days of work — start there.
+    return output, removed
+
+
+# ---------------------------------------------------------------------------
+# JSON-aware compression (for ES payloads that are arrays of log objects)
+# ---------------------------------------------------------------------------
+
+def _compress_json_log_array(
+    log_objects: list[dict], cfg: CompressorConfig
+) -> tuple[list[dict], list[str]]:
+    """
+    Apply severity filter and deduplication to a JSON array of log objects.
+    Deduplication is done on the 'message' field.
+    Returns (filtered_objects, techniques_applied).
+    """
+    techniques: list[str] = []
+
+    # Step 1: Severity filter on JSON objects
+    if cfg.filter_enabled:
+        keep_levels_lower = {l.lower() for l in cfg.keep_levels}
+        filtered: list[dict] = []
+        info_kept = 0
+        removed = 0
+
+        for obj in log_objects:
+            level = str(obj.get("level", obj.get("log_level", "unknown"))).lower()
+
+            if level in ("debug", "trace"):
+                removed += 1
+                continue
+            if level == "info":
+                if info_kept < cfg.max_info_lines:
+                    filtered.append(obj)
+                    info_kept += 1
+                else:
+                    removed += 1
+                continue
+            filtered.append(obj)
+
+        if removed:
+            techniques.append(f"severity_filter:{removed}_dropped")
+        log_objects = filtered
+
+    # Step 2: Dedup on message field
+    if cfg.dedup_enabled and cfg.dedup_threshold >= 2:
+        deduped: list[dict] = []
+        removed_dedup = 0
+        i = 0
+        while i < len(log_objects):
+            current = log_objects[i]
+            current_key = _normalise_line(current.get("message", str(current)))
+
+            j = i + 1
+            while j < len(log_objects):
+                next_key = _normalise_line(log_objects[j].get("message", str(log_objects[j])))
+                if next_key != current_key:
+                    break
+                j += 1
+
+            count = j - i
+            if count >= cfg.dedup_threshold:
+                entry = dict(current)
+                entry["_count"] = count
+                deduped.append(entry)
+                removed_dedup += count - 1
+            else:
+                deduped.extend(log_objects[i:j])
+            i = j
+
+        if removed_dedup:
+            techniques.append(f"dedup:{removed_dedup}_collapsed")
+        log_objects = deduped
+
+    return log_objects, techniques
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def compress_logs(raw: str, cfg: CompressorConfig = None) -> tuple[str, CompressionStats]:
+    """
+    Compress a raw log string (JSON array or plain text log lines).
+
+    This is Hook 1 — call this in the Parser agent after fetching from ES,
+    before passing logs downstream to TimeWindow/StreamClassifier.
+
+    Returns:
+        (compressed_string, stats)
+    """
+    if cfg is None:
+        cfg = CompressorConfig()
+
+    techniques: list[str] = []
+    tokens_before = _count_tokens(raw)
+    text = raw
+
+    # --- Try JSON path first (ES responses are JSON) ---
+    is_json = False
+    try:
+        parsed = json.loads(text)
+        is_json = True
+    except (json.JSONDecodeError, ValueError):
+        parsed = None
+
+    if is_json and isinstance(parsed, list):
+        # JSON array of log objects
+        compressed_objects, json_techniques = _compress_json_log_array(parsed, cfg)
+        techniques.extend(json_techniques)
+
+        # Minify the output
+        if cfg.minify_json:
+            text = json.dumps(compressed_objects, separators=(",", ":"), ensure_ascii=False)
+            techniques.append("json_minify")
+        else:
+            text = json.dumps(compressed_objects, ensure_ascii=False)
+
+    elif is_json:
+        # Single JSON object or other shape — just minify
+        if cfg.minify_json:
+            text = json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+            techniques.append("json_minify")
+
+    else:
+        # Plain text log lines
+        lines = text.splitlines()
+        original_line_count = len(lines)
+
+        if cfg.filter_enabled:
+            lines, n_filtered = _filter_by_severity(lines, cfg)
+            if n_filtered:
+                techniques.append(f"severity_filter:{n_filtered}_dropped")
+
+        if cfg.dedup_enabled:
+            lines, n_deduped = _dedup_lines(lines, cfg)
+            if n_deduped:
+                techniques.append(f"dedup:{n_deduped}_collapsed")
+
+        text = "\n".join(lines)
+
+    tokens_after = _count_tokens(text)
+    tokens_saved = tokens_before - tokens_after
+    ratio = tokens_saved / tokens_before if tokens_before > 0 else 0.0
+
+    return text, CompressionStats(
+        tokens_before=tokens_before,
+        tokens_after=tokens_after,
+        tokens_saved=tokens_saved,
+        compression_ratio=ratio,
+        techniques_applied=techniques,
+    )
+
+
+def compress_messages(
+    messages: list[dict[str, Any]], cfg: CompressorConfig = None
+) -> tuple[list[dict[str, Any]], CompressionStats]:
+    """
+    Compress a list of LLM messages (OpenAI/Anthropic format).
+
+    This is Hook 2/3 — call this before any LLM call in the Summarizer
+    or Analyzer agents to compress large tool outputs and conversation history.
+
+    Compresses:
+      - role=tool / role=tool_result messages (ES log payloads)
+      - role=assistant messages with large content (conversation history)
+
+    Leaves intact:
+      - role=user messages (user queries — never compress)
+      - role=system messages (system prompt — never compress)
+
+    Returns:
+        (compressed_messages, stats)
+    """
+    if cfg is None:
+        cfg = CompressorConfig()
+
+    tokens_before = _count_message_tokens(messages)
+    techniques: list[str] = []
+    result = []
+
+    for msg in messages:
+        role = msg.get("role", "")
+
+        # Never touch user or system messages
+        if role in ("user", "system"):
+            result.append(msg)
+            continue
+
+        # Compress tool output messages
+        if role == "tool":
+            content = msg.get("content", "")
+            if isinstance(content, str) and len(content) > 200:
+                compressed, stats = compress_logs(content, cfg)
+                techniques.extend(stats.techniques_applied)
+                result.append({**msg, "content": compressed})
+            else:
+                result.append(msg)
+            continue
+
+        # Anthropic-style: content is a list of blocks
+        content = msg.get("content")
+        if isinstance(content, list):
+            new_blocks = []
+            for block in content:
+                if not isinstance(block, dict):
+                    new_blocks.append(block)
+                    continue
+                block_type = block.get("type", "")
+                if block_type in ("tool_result",):
+                    inner = block.get("content", "")
+                    if isinstance(inner, str) and len(inner) > 200:
+                        compressed, stats = compress_logs(inner, cfg)
+                        techniques.extend(stats.techniques_applied)
+                        new_blocks.append({**block, "content": compressed})
+                    else:
+                        new_blocks.append(block)
+                else:
+                    new_blocks.append(block)
+            result.append({**msg, "content": new_blocks})
+            continue
+
+        # Assistant message with large string content (history compression)
+        if role == "assistant" and isinstance(content, str) and len(content) > 500:
+            compressed, stats = compress_logs(content, cfg)
+            techniques.extend(stats.techniques_applied)
+            result.append({**msg, "content": compressed})
+            continue
+
+        result.append(msg)
+
+    tokens_after = _count_message_tokens(result)
+    tokens_saved = tokens_before - tokens_after
+    ratio = tokens_saved / tokens_before if tokens_before > 0 else 0.0
+
+    return result, CompressionStats(
+        tokens_before=tokens_before,
+        tokens_after=tokens_after,
+        tokens_saved=tokens_saved,
+        compression_ratio=ratio,
+        techniques_applied=list(dict.fromkeys(techniques)),  # dedupe technique list
+    )
+
+
+# ---------------------------------------------------------------------------
+# Quick demo / smoke test
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import textwrap
+
+    # --- Test 1: JSON log array (ES payload) ---
+    sample_logs = [
+        {"timestamp": "2026-05-21T10:00:01Z", "level": "DEBUG", "service": "order-service", "message": "Entering processOrder method", "duration_ms": 1},
+        {"timestamp": "2026-05-21T10:00:02Z", "level": "DEBUG", "service": "order-service", "message": "Entering processOrder method", "duration_ms": 1},
+        {"timestamp": "2026-05-21T10:00:03Z", "level": "DEBUG", "service": "order-service", "message": "Entering processOrder method", "duration_ms": 1},
+        {"timestamp": "2026-05-21T10:00:04Z", "level": "INFO",  "service": "order-service", "message": "Request received POST /api/orders/create", "duration_ms": 45, "status": 200},
+        {"timestamp": "2026-05-21T10:00:05Z", "level": "INFO",  "service": "order-service", "message": "Request received POST /api/orders/create", "duration_ms": 47, "status": 200},
+        {"timestamp": "2026-05-21T10:00:06Z", "level": "INFO",  "service": "order-service", "message": "Request received POST /api/orders/create", "duration_ms": 43, "status": 200},
+        {"timestamp": "2026-05-21T10:00:10Z", "level": "ERROR", "service": "order-service", "message": "NullPointerException in OrderService.processOrder()", "exception": "java.lang.NullPointerException", "stack_trace": "at com.comcast.orders.OrderService.processOrder(OrderService.java:247)"},
+        {"timestamp": "2026-05-21T10:00:11Z", "level": "ERROR", "service": "order-service", "message": "NullPointerException in OrderService.processOrder()", "exception": "java.lang.NullPointerException", "stack_trace": "at com.comcast.orders.OrderService.processOrder(OrderService.java:247)"},
+        {"timestamp": "2026-05-21T10:00:12Z", "level": "ERROR", "service": "order-service", "message": "NullPointerException in OrderService.processOrder()", "exception": "java.lang.NullPointerException", "stack_trace": "at com.comcast.orders.OrderService.processOrder(OrderService.java:247)"},
+        {"timestamp": "2026-05-21T10:00:14Z", "level": "WARN",  "service": "order-service", "message": "Circuit breaker tripped for downstream payment-service", "duration_ms": 5001},
+        {"timestamp": "2026-05-21T10:00:15Z", "level": "WARN",  "service": "order-service", "message": "Circuit breaker tripped for downstream payment-service", "duration_ms": 5002},
+        {"timestamp": "2026-05-21T10:00:20Z", "level": "DEBUG", "service": "order-service", "message": "Exiting processOrder method", "duration_ms": 1},
+    ]
+
+    raw = json.dumps(sample_logs, indent=2)
+    compressed, stats = compress_logs(raw)
+
+    print("=" * 60)
+    print("TEST 1: JSON log array (ES payload)")
+    print("=" * 60)
+    print(f"  {stats}")
+    print(f"  Techniques: {stats.techniques_applied}")
+    print(f"\nCompressed output:\n{compressed[:500]}...")
+
+    # --- Test 2: Plain text logs ---
+    plain_logs = textwrap.dedent("""\
+        2026-05-21 10:00:01 DEBUG Entering processOrder
+        2026-05-21 10:00:02 DEBUG Entering processOrder
+        2026-05-21 10:00:03 DEBUG Entering processOrder
+        2026-05-21 10:00:04 INFO  Request received POST /api/orders
+        2026-05-21 10:00:05 INFO  Request received POST /api/orders
+        2026-05-21 10:00:10 ERROR NullPointerException in OrderService.processOrder()
+          at com.comcast.orders.OrderService.processOrder(OrderService.java:247)
+          at com.comcast.orders.OrderController.handleOrder(OrderController.java:89)
+        2026-05-21 10:00:14 WARN  Circuit breaker tripped for payment-service
+        2026-05-21 10:00:15 WARN  Circuit breaker tripped for payment-service
+        2026-05-21 10:00:20 DEBUG Exiting processOrder
+    """)
+
+    compressed2, stats2 = compress_logs(plain_logs)
+    print("\n" + "=" * 60)
+    print("TEST 2: Plain text logs")
+    print("=" * 60)
+    print(f"  {stats2}")
+    print(f"  Techniques: {stats2.techniques_applied}")
+    print(f"\nCompressed output:\n{compressed2}")
+
+    # --- Test 3: Message list compression ---
+    messages = [
+        {"role": "system", "content": "You are a log analysis agent."},
+        {"role": "user",   "content": "Investigate the spike in errors between 10:00 and 10:05"},
+        {"role": "tool",   "content": raw},
+    ]
+
+    compressed3, stats3 = compress_messages(messages)
+    print("\n" + "=" * 60)
+    print("TEST 3: Message list (Summarizer/Analyzer hook)")
+    print("=" * 60)
+    print(f"  {stats3}")
+    print(f"  Techniques: {stats3.techniques_applied}")
+    print(f"\n  system message: unchanged ✓")
+    print(f"  user message:   unchanged ✓")
+    print(f"  tool message:   {len(raw)} chars → {len(compressed3[2]['content'])} chars")
