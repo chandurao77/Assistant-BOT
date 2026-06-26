@@ -1,3 +1,54 @@
+
+
+
+
+
+
+
+Looking at both screenshots, I can see the QueryQuokka investigation UI. Here's what I'm observing about the chart issues:
+
+## Image 1 — Chart looks fine
+The "LOG VOLUME (5S BUCKETS)" chart renders normally with clear red/blue bars and readable timestamps on the x-axis.
+
+## Image 2 — Chart has a rendering problem
+
+**What's broken:**
+- The x-axis timestamps are **completely compressed/overlapping** — they're rendered as a dense, unreadable blob of text
+- The bars themselves look extremely thin/compressed horizontally, almost like vertical lines rather than distinct bars
+- This is because **748 key events** are being plotted vs only **142** in Image 1 — roughly 5x more data points crammed into the same canvas width
+
+---
+
+## Root Cause
+
+The chart is trying to render **748 events in 5-second buckets** across what appears to be a much longer time window, but the SVG/canvas width stays fixed. This causes:
+
+1. **X-axis label collision** — no dynamic label skipping or rotation logic
+2. **Bar width collapse** — bars become sub-pixel width at high density
+
+---
+
+## Suggested Fixes
+
+```javascript
+// 1. Skip x-axis labels dynamically
+const labelInterval = Math.ceil(buckets.length / 20); // show max ~20 labels
+ticks: { callback: (val, i) => i % labelInterval === 0 ? val : '' }
+
+// 2. Set minimum bar width
+barThickness: Math.max(2, chartWidth / buckets.length)
+
+// 3. Rotate labels when dense
+maxRotation: 45,
+autoSkip: true,
+autoSkipPadding: 10
+```
+
+Want me to pull the actual chart component code and patch it?
+
+
+
+
 """
 log_compressor.py
 -----------------
