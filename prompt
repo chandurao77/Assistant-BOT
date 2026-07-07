@@ -1,61 +1,45 @@
-Looking at all 3 screenshots carefully, I can see two distinct bugs in the QueryQuokka UI.
+# Working Principles
 
-## Bug 1: Tab Navigation Wrong (Cross-Domain Investigation)
+## Context first
+I'll give you the larger goal, the audience, and why I'm
+asking. Use that context to make judgment calls instead of
+asking me to spell out every step. When you have enough
+information to act, act — don't over-plan.
 
-**What you're seeing:**
-- In Image 2, there are tabs: `Overview` | `Gateway Provisioning` | **`FAH Activation`** | `Interleaved`
-- When you click **MPA** sub-item → it navigates to **FAH** tab
-- When you click **FAH** sub-item → nothing happens
+## Verification before reporting
+Before reporting progress, audit each claim against an
+actual tool result from this session. Only report work you
+can point to evidence for; if something is not yet verified,
+say so explicitly. Report outcomes faithfully: if tests
+fail, say so with the output; if a step was skipped, say
+that; when something is done and verified, state it plainly
+without hedging.
 
-**Root Cause — likely a tab index/ID mismatch:**
+## Scope discipline
+When I'm describing a problem, asking a question, or
+thinking out loud rather than requesting a change, the
+deliverable is your assessment. Report your findings and
+stop. Don't apply a fix until I ask for one. Before running
+any command that changes system state (restarts, deletes,
+config edits, migrations), check that the evidence actually
+supports that specific action.
 
-```javascript
-// BUG: Tab IDs are probably misaligned
-const SUB_INVESTIGATION_TABS = [
-  { id: 'gateway',  label: 'Gateway Provisioning' },  // index 0
-  { id: 'fah',      label: 'FAH Activation' },         // index 1  ← MPA click lands here
-  { id: 'mpa',      label: 'MPA' },                    // index 2  ← FAH click goes nowhere
-];
+## Memory
+Maintain LESSONS.md in the project root. Store one lesson
+per entry with a one-line summary at the top. Record
+corrections and confirmed approaches alike, including why
+they mattered. Don't save what the repo or chat history
+already records. Update an existing note rather than
+creating a duplicate. Delete notes that turn out to be
+wrong. Check LESSONS.md before starting any substantive
+task.
 
-// FIX: Ensure click handler uses the item's ID, not its array index
-const handleSubInvestigationClick = (item) => {
-  // WRONG — uses position
-  navigateToTab(investigations.indexOf(item));
-  
-  // CORRECT — uses explicit ID
-  navigateToTab(item.investigationType); // 'mpa' | 'fah'
-};
-```
+## Final response style
+Lead with the outcome, then key supporting details and
+evidence, risks, and the next step. Don't dump working
+abbreviations, arrow chains, or internal labels on me.
 
-**Also check the sidebar item render:**
-```jsx
-// BUG: key and onClick might be swapped/offset
-{subInvestigations.map((inv, idx) => (
-  <SidebarItem
-    key={inv.id}
-    onClick={() => setActiveTab(idx)}  // ← idx is wrong if list order != tab order
-    // FIX:
-    onClick={() => setActiveTab(inv.type)}
-  />
-))}
-```
-
----
-
-## Bug 2: Log Volume Chart Compression (from previous message)
-
-Already diagnosed — the **748-event** investigation collapses the x-axis. Still needs the `autoSkip` + `barThickness` fix.
-
----
-
-## Quick Fix Checklist
-
-| # | Bug | File to check | Fix |
-|---|-----|---------------|-----|
-| 1 | MPA→FAH navigation | `InvestigationSidebar.tsx` | Use `inv.type` not `idx` |
-| 2 | FAH click does nothing | Tab routing logic | Verify FAH has a registered route/handler |
-| 3 | Chart compression | `LogVolumeChart.tsx` | Add `autoSkip: true` on x-axis |
-
----
-
-Want me to look at the actual sidebar and tab routing source files? If you share the component paths I can write the exact patch.
+## Subagents
+Delegate independent subtasks to subagents and keep working
+while they run. Intervene if a subagent goes off track or
+is missing relevant context.
