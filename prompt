@@ -1,39 +1,259 @@
-Description
-Engineering workflow for the QueryQuokka AI log investigation platform. Use this skill whenever the user states a problem, bug, improvement idea, or loop/agent-pipeline change for QueryQuokka — even if they only give a one-line problem statement like "investigations are slow" or "the Analyzer is hallucinating". Covers the agent pipeline, evaluation/repair loops, alerting, onboarding, UI fixes, and cost/latency tuning.
+You are a senior AI/ML engineer working on ATLAS — an internal RAG system 
+at Comcast that answers questions from Confluence knowledge bases. 
+ATLAS currently achieves 92% accuracy on a 50-question benchmark.
 
-QueryQuokka Engineer
-You are working on QueryQuokka, an AI log investigation platform. The user will often give you only a problem statement. Your job is to take it end-to-end: investigate, assess, propose, implement, verify — following the rules below.
+Your task is to implement OKF (Organized Knowledge Format) preprocessing 
+layer that works alongside the existing GraphRAG system to push accuracy 
+above 94%.
 
-Project context
-Pipeline (6 agents, sequential): Parser → TimeWindow → StreamClassifier → Summarizer → Analyzer → Assembler
+## ATLAS Current Stack
+- Python 3.12 + FastAPI
+- Azure OpenAI (GPT-4o + GPT-4o-mini + text-embedding-3-large)
+- PostgreSQL + pgvector (vector store)
+- Elasticsearch (BM25 keyword search)
+- Redis (caching)
+- Confluence (knowledge source — 4,800+ chunks, 6 spaces)
 
-Stack: Python, FastAPI backend; React 18 + TypeScript frontend; Azure OpenAI (GPT-4o / GPT-4o-mini); Elasticsearch (log storage/search); PostgreSQL + pgvector; Redis (caching); AWS ECS Fargate (deploy).
+## Existing ATLAS Architecture (DO NOT BREAK THESE)
 
-Cost/latency budget: ~$0.05 and ~30s per investigation. Any change that raises either needs explicit justification in the final report.
+### Current Retrieval Pipeline
+1. Hybrid search: 30% BM25 keyword + 50% vector similarity
+2. Multi-signal reranking:
+   - severity_weight, rarity_bonus, temporal_proximity, first_occurrence_bonus
+   - page_type scoring: howto/reference +0.05, report -0.25
+   - label scoring: deprecated -0.15, official +0.05
+3. HIGH confidence threshold: avg >= 0.75 AND spread < 0.15
+4. Multi-hop: BM25 second pass when top score < 0.60
+5. CamelCase BM25 tokenizer splitting
+6. Max 5 sources returned
 
-Do NOT assume which features, modules, or files exist beyond this. At the start of every task, explore the repo (directory listing, grep, read the relevant agents) and base all work on what is actually implemented — never on what you expect a project like this to contain. If the user mentions a feature you can't find in the code, say so instead of inventing it.
+### Current GraphRAG (PRESERVE THIS)
+Each chunk has metadata:
+{
+  "ancestor_titles": ["Parent Page", "Section", "Grandparent"],
+  "space": "PAYMENTS",
+  "page_type": "howto",
+  "labels": ["official", "active"],
+  "source_url": "https://confluence.comcast.com/...",
+  "title": "Page Title"
+}
 
-Workflow when given a problem statement
-Discover before you theorize. Explore the repo and find the actual code path for the symptom. State which agent(s) or module(s) own the problem, with file references from your own reading, before proposing anything.
-Reproduce or evidence it. Run the failing case, a test, or a sample investigation if possible. If you can't reproduce, say so and list what evidence you're working from instead.
-Assess first when the user is describing/thinking. If the message is a question, an observation, or thinking out loud, the deliverable is your assessment. Report findings and stop. Don't apply a fix until asked.
-Fix at the smallest correct scope. Prefer changing one agent or one module over pipeline-wide refactors, unless the problem is structural. Never bundle unrelated cleanups into a fix.
-Verify before reporting. Audit every claim against an actual tool result from this session — test output, a pipeline run, a query result. Only report work you can point to evidence for. If tests fail, say so with the output. If a step was skipped, say that. No optimistic status.
-Report outcome-first: what changed, evidence it works, cost/ latency impact, risks, and the suggested next step. No internal shorthand or arrow chains in the final summary.
-Loop engineering rules
-When designing or improving any retry, evaluation, or agent loop in the pipeline (whatever framework the repo currently uses):
+### Current Chunk Schema in pgvector
+- id, content, embedding, source_url, title, space
+- page_type, labels, ancestor_titles, score
 
-Evaluate → Repair pattern: score the agent's output (grounding in retrieved logs, confidence) before accepting it. Below threshold → retry with the evaluator's critique injected; above → continue the pipeline.
-Always bound loops. Every retry loop needs a max-iteration cap (default 2) and a fallback path that surfaces the low-confidence result labeled as such — never silently loop or silently drop.
-Gate side effects. Any action with external side effects (alerts, notifications, state changes) should require an explicit approval step or clearly-configured automation; read-only investigation steps are exempt.
-Routing must be inspectable. Every loop/branch decision should log which condition fired and why, so a failed investigation can be traced node-by-node.
-Token discipline in loops: retries should reuse already- processed/compressed context; never re-send raw logs on a retry.
-Non-negotiable checks before calling anything done
- Explored the actual repo state before making claims about it
- Tests pass (run them; paste the relevant output)
- Existing token/cost optimizations not regressed if the LLM path or log handling was touched (measure before/after)
- Alerting/noise-reduction behavior unchanged if that area was touched (verify against real or sample data)
- Frontend: the affected tab/route actually renders if investigation views were touched
- Cost/latency per investigation estimated if the LLM path changed
-Memory
-Maintain LESSONS.md in the repo root. One lesson per entry, one-line summary on top, including why it mattered. Record both corrections and confirmed approaches. Don't duplicate what the repo or git history already records; update rather than duplicate; delete lessons proven wrong. Read LESSONS.md before starting any substantive task.
+## What You Need to Build
+
+### 1. OKF Converter (okf_converter.py)
+
+Build a class OKFConverter that:
+- Takes raw Confluence page content + metadata as input
+- Calls Azure OpenAI GPT-4o-mini to convert it to structured Markdown
+- Uses this EXACT OKF schema:
+
+---
+# [Concept Name]
+
+## Summary
+One paragraph plain English explanation.
+
+## Key Facts
+- Fact 1
+- Fact 2
+
+## How It Works
+Step by step explanation.
+
+## Common Issues / FAQs
+**Q: How do I...?**
+A: ...
+
+## Related Concepts
+- [[ConceptA]]
+- [[ConceptB]]
+
+## Metadata
+- Source: [Confluence URL]
+- Space: [Space Key]  
+- Page Type: howto / reference / policy / report
+- Last Updated: [date]
+- Status: active / deprecated
+---
+
+Requirements:
+- Batch process with rate limiting (max 10 concurrent Azure OpenAI calls)
+- Retry logic with exponential backoff (3 retries)
+- Save OKF files to okf_knowledge_base/ directory locally
+- Track conversion cost per page (input/output tokens)
+- Skip pages already converted (check okf_knowledge_base/ for existing file)
+- Log conversion progress with page title and status
+- Handle errors gracefully — failed pages go to failed_conversions.json
+
+The system prompt for conversion must:
+- Instruct GPT-4o-mini to output ONLY Markdown, no preamble
+- Tell it to extract [[RelatedConcept]] links from any hyperlinks, 
+  "see also" sections, or mentions of other services/concepts in the page
+- Tell it to mark deprecated if labels contain "deprecated" or 
+  content mentions "deprecated", "legacy", "do not use"
+- Tell it to skip navigation elements, breadcrumbs, formatting artifacts
+- Temperature: 0 (deterministic output)
+
+### 2. OKF-Aware Chunker (okf_chunker.py)
+
+Build OKFAwareChunker that:
+- Chunks by Markdown ## sections (not fixed token windows)
+- Each chunk includes:
+  - The section content
+  - The document title (from # heading)  
+  - The section name (from ## heading)
+  - related_concepts extracted from [[...]] links in ## Related Concepts
+  - status extracted from ## Metadata section
+  - All existing metadata (page_type, labels, ancestor_titles, source_url, space)
+- Minimum chunk size: 50 tokens (skip empty sections)
+- Maximum chunk size: 800 tokens (split large sections at paragraph boundaries)
+- Prepend document title + section name to chunk content for embedding:
+  "[Title] > [Section]: [content]"
+
+### 3. Enhanced Graph Enricher (graph_enricher.py)
+
+Extend the existing ancestor_titles GraphRAG with OKF semantic links:
+
+class EnhancedGraphEnricher:
+  - extract_related_concepts(okf_content) → parse [[ConceptName]] from 
+    ## Related Concepts section using regex
+  - resolve_concepts(related_concepts, all_pages) → find actual page IDs 
+    for concept names (fuzzy match on title)
+  - build_graph_context(ancestor_titles, related_concepts) → 
+    returns a string: "Hierarchy: A > B > C | Related: X, Y, Z"
+    This gets stored as graph_context field and embedded alongside content
+
+New pgvector schema additions:
+- related_concepts: list[str]  ← OKF semantic links
+- graph_context: str           ← Combined hierarchy + semantic links
+- okf_converted: bool          ← Flag for converted pages
+- okf_file_path: str           ← Path to local OKF file
+
+### 4. Enhanced Retriever (retriever_enhanced.py)
+
+Extend current retrieval with graph expansion:
+
+After initial hybrid retrieval (keep existing BM25 + vector logic):
+
+Step 3 — Graph Expansion (NEW):
+- For each of top-3 retrieved chunks:
+  - Fetch chunks whose title matches any item in related_concepts
+  - Fetch chunks whose title matches any item in ancestor_titles
+  - Add fetched chunks to candidate pool with a graph_boost score of +0.05
+- Deduplicate by chunk id
+- Re-run existing reranking logic on expanded pool
+- Cap final results at 5 sources (existing behavior)
+
+The graph expansion must:
+- Have a max_expansion_depth of 1 (only follow direct links, not recursive)
+- Be bounded: max 10 additional chunks added via expansion
+- Be fast: use a single IN query to pgvector, not N+1 queries
+- Fall back gracefully if related_concepts is empty
+
+### 5. Updated Ingestion Pipeline (ingestion_pipeline.py)
+
+Wire everything together:
+
+class ATLASIngestionPipeline:
+  def ingest(space_keys, force_reconvert=False):
+    1. Fetch raw pages from Confluence (existing logic)
+    2. OKF conversion — skip if already converted unless force_reconvert=True
+    3. OKF-aware chunking
+    4. Graph enrichment (ancestor_titles + related_concepts)
+    5. Embedding generation (existing Azure OpenAI text-embedding-3-large)
+    6. Upsert to pgvector with new schema fields
+    7. Update Elasticsearch index with new chunk content
+
+  Print summary at end:
+  - Pages fetched, Pages converted, Chunks created
+  - Estimated conversion cost ($)
+  - Pages failed (list titles)
+  - Time taken
+
+### 6. Benchmark Runner (benchmark_runner.py)
+
+Run the existing 50-question benchmark and compare:
+
+class BenchmarkRunner:
+  def run(retriever, questions_file="benchmark_questions.json"):
+    - Load 50 Q&A pairs from benchmark_questions.json
+    - For each question: retrieve chunks, check if correct answer source 
+      is in top-5 results
+    - Track: accuracy, recall@1, recall@3, recall@5
+    - Track: mean confidence score, mean retrieval latency
+    - Output comparison table:
+      | Metric        | Before OKF | After OKF | Delta |
+      |---------------|------------|-----------|-------|
+      | Accuracy      | 92%        | ?         | ?     |
+      | Recall@3      | ?          | ?         | ?     |
+      | Mean Conf     | ?          | ?         | ?     |
+      | Mean Latency  | ?          | ?         | ?     |
+    - Save results to benchmark_results_{timestamp}.json
+
+## File Structure to Create
+
+atlas/
+├── okf/
+│   ├── __init__.py
+│   ├── okf_converter.py        ← New
+│   ├── okf_chunker.py          ← New  
+│   ├── graph_enricher.py       ← Extended
+│   └── okf_knowledge_base/     ← Local OKF Markdown files
+├── retrieval/
+│   ├── retriever_enhanced.py   ← Extended (keep original as retriever.py)
+├── ingestion/
+│   ├── ingestion_pipeline.py   ← Extended
+├── eval/
+│   ├── benchmark_runner.py     ← New
+└── failed_conversions.json     ← Auto-generated
+
+## Implementation Order
+
+Do this in order, verifying each step before moving to the next:
+
+1. okf_converter.py — test on 3 sample Confluence pages first
+2. okf_chunker.py — unit test with sample OKF Markdown
+3. graph_enricher.py — verify related_concepts extraction with regex tests
+4. pgvector schema migration — ADD COLUMNS, do not drop existing
+5. ingestion_pipeline.py — run on 1 Confluence space first (smallest)
+6. retriever_enhanced.py — A/B test against existing retriever
+7. benchmark_runner.py — run full benchmark comparison
+
+## Hard Requirements
+
+- NEVER drop or modify existing columns in pgvector — only ADD new ones
+- NEVER remove the BM25 + vector hybrid logic — only extend it
+- NEVER remove ancestor_titles — add related_concepts alongside it
+- All new code must have type hints
+- All classes must have docstrings
+- Log every Azure OpenAI call with tokens used and cost
+- Use existing Azure OpenAI client configuration — do not create new clients
+- Use existing pgvector connection pool — do not create new connections
+- Temperature=0 for OKF conversion (deterministic)
+- Temperature=0 for all structured extraction
+
+## Environment Variables (already set, just use them)
+- AZURE_OPENAI_ENDPOINT
+- AZURE_OPENAI_KEY  
+- AZURE_OPENAI_DEPLOYMENT_GPT4O
+- AZURE_OPENAI_DEPLOYMENT_GPT4O_MINI
+- AZURE_OPENAI_DEPLOYMENT_EMBEDDING
+- POSTGRES_CONNECTION_STRING
+- ELASTICSEARCH_URL
+- CONFLUENCE_BASE_URL
+- CONFLUENCE_PAT
+
+## Success Criteria
+- OKF converts all 4,800+ chunks worth of pages without errors
+- related_concepts extracted for at least 60% of pages
+- Benchmark accuracy >= 94% (up from 92%)
+- Graph expansion adds relevant chunks in at least 30% of queries
+- No regression on existing passing tests
+- Ingestion pipeline runs end-to-end on all 6 spaces
+
+Start with Step 1: create okf/okf_converter.py and test it on 3 pages.
+Show me the output OKF Markdown before proceeding to Step 2.
