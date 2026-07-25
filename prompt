@@ -1,259 +1,210 @@
-You are a senior AI/ML engineer working on ATLAS — an internal RAG system 
-at Comcast that answers questions from Confluence knowledge bases. 
-ATLAS currently achieves 92% accuracy on a 50-question benchmark.
+# RCA Accuracy — Fix Prompts
 
-Your task is to implement OKF (Organized Knowledge Format) preprocessing 
-layer that works alongside the existing GraphRAG system to push accuracy 
-above 94%.
+Generic, copy-paste prompts for an LLM-based root-cause analysis pipeline.
+No environment, service, or configuration details included.
 
-## ATLAS Current Stack
-- Python 3.12 + FastAPI
-- Azure OpenAI (GPT-4o + GPT-4o-mini + text-embedding-3-large)
-- PostgreSQL + pgvector (vector store)
-- Elasticsearch (BM25 keyword search)
-- Redis (caching)
-- Confluence (knowledge source — 4,800+ chunks, 6 spaces)
-
-## Existing ATLAS Architecture (DO NOT BREAK THESE)
-
-### Current Retrieval Pipeline
-1. Hybrid search: 30% BM25 keyword + 50% vector similarity
-2. Multi-signal reranking:
-   - severity_weight, rarity_bonus, temporal_proximity, first_occurrence_bonus
-   - page_type scoring: howto/reference +0.05, report -0.25
-   - label scoring: deprecated -0.15, official +0.05
-3. HIGH confidence threshold: avg >= 0.75 AND spread < 0.15
-4. Multi-hop: BM25 second pass when top score < 0.60
-5. CamelCase BM25 tokenizer splitting
-6. Max 5 sources returned
-
-### Current GraphRAG (PRESERVE THIS)
-Each chunk has metadata:
-{
-  "ancestor_titles": ["Parent Page", "Section", "Grandparent"],
-  "space": "PAYMENTS",
-  "page_type": "howto",
-  "labels": ["official", "active"],
-  "source_url": "https://confluence.comcast.com/...",
-  "title": "Page Title"
-}
-
-### Current Chunk Schema in pgvector
-- id, content, embedding, source_url, title, space
-- page_type, labels, ancestor_titles, score
-
-## What You Need to Build
-
-### 1. OKF Converter (okf_converter.py)
-
-Build a class OKFConverter that:
-- Takes raw Confluence page content + metadata as input
-- Calls Azure OpenAI GPT-4o-mini to convert it to structured Markdown
-- Uses this EXACT OKF schema:
+Paste one prompt at a time, along with only the specific file or function it refers to.
 
 ---
-# [Concept Name]
 
-## Summary
-One paragraph plain English explanation.
+## Prompt 1 — Truncated-list count bug (highest impact, one line)
 
-## Key Facts
-- Fact 1
-- Fact 2
+```
+In this file, the statistics summary line that gets sent to the LLM is built from a
+list that has already been truncated with a slice, while the other counts in the same
+line are computed from the full event list.
 
-## How It Works
-Step by step explanation.
+The result is that the LLM is told there are far fewer errors than actually occurred,
+while success and warning counts are reported in full. This makes a failing case look
+healthy and causes the model to understate severity and misattribute the cause.
 
-## Common Issues / FAQs
-**Q: How do I...?**
-A: ...
+Fix it so that:
+1. All counts in the summary line are computed from the complete, unsliced event list.
+2. The truncated list is still used for the detailed listing, but the header explicitly
+   states both numbers, e.g. "N total errors (showing top M)".
+3. Add a unit test that builds an event list with more errors than the slice limit and
+   asserts the reported count equals the true total, not the slice size.
 
-## Related Concepts
-- [[ConceptA]]
-- [[ConceptB]]
+Show me the diff and the test.
+```
 
-## Metadata
-- Source: [Confluence URL]
-- Space: [Space Key]  
-- Page Type: howto / reference / policy / report
-- Last Updated: [date]
-- Status: active / deprecated
 ---
 
-Requirements:
-- Batch process with rate limiting (max 10 concurrent Azure OpenAI calls)
-- Retry logic with exponential backoff (3 retries)
-- Save OKF files to okf_knowledge_base/ directory locally
-- Track conversion cost per page (input/output tokens)
-- Skip pages already converted (check okf_knowledge_base/ for existing file)
-- Log conversion progress with page title and status
-- Handle errors gracefully — failed pages go to failed_conversions.json
+## Prompt 2 — Replace positional slices with relevance ranking
 
-The system prompt for conversion must:
-- Instruct GPT-4o-mini to output ONLY Markdown, no preamble
-- Tell it to extract [[RelatedConcept]] links from any hyperlinks, 
-  "see also" sections, or mentions of other services/concepts in the page
-- Tell it to mark deprecated if labels contain "deprecated" or 
-  content mentions "deprecated", "legacy", "do not use"
-- Tell it to skip navigation elements, breadcrumbs, formatting artifacts
-- Temperature: 0 (deterministic output)
+```
+This function selects events to send to an LLM by taking the first N items from a
+filtered list. There is no scoring or sorting, so which events survive is arbitrary —
+it depends on list order, not importance. On long runs the causally significant events
+fall outside the window.
 
-### 2. OKF-Aware Chunker (okf_chunker.py)
+Replace every first-N slice with a ranked best-N selection:
 
-Build OKFAwareChunker that:
-- Chunks by Markdown ## sections (not fixed token windows)
-- Each chunk includes:
-  - The section content
-  - The document title (from # heading)  
-  - The section name (from ## heading)
-  - related_concepts extracted from [[...]] links in ## Related Concepts
-  - status extracted from ## Metadata section
-  - All existing metadata (page_type, labels, ancestor_titles, source_url, space)
-- Minimum chunk size: 50 tokens (skip empty sections)
-- Maximum chunk size: 800 tokens (split large sections at paragraph boundaries)
-- Prepend document title + section name to chunk content for embedding:
-  "[Title] > [Section]: [content]"
+1. Add a scoring function that ranks each event by a weighted combination of:
+   - whether the error was unrecovered vs. later retried/resolved
+   - temporal proximity to the first failure or terminal event
+   - how central the emitting component is to the flow being analyzed
+   - rarity of the message pattern (repeated identical noise scores lower)
+2. Sort by score descending, then take the top N.
+3. Make the weights module-level named constants with a comment explaining each.
+4. Keep the same N so this change is isolated and measurable on its own.
+5. Log the score distribution of selected vs. dropped events so selection is inspectable.
 
-### 3. Enhanced Graph Enricher (graph_enricher.py)
+Add unit tests that assert a high-signal event placed at the end of a long input list
+still gets selected. Show the diff and tests.
+```
 
-Extend the existing ancestor_titles GraphRAG with OKF semantic links:
+---
 
-class EnhancedGraphEnricher:
-  - extract_related_concepts(okf_content) → parse [[ConceptName]] from 
-    ## Related Concepts section using regex
-  - resolve_concepts(related_concepts, all_pages) → find actual page IDs 
-    for concept names (fuzzy match on title)
-  - build_graph_context(ancestor_titles, related_concepts) → 
-    returns a string: "Hierarchy: A > B > C | Related: X, Y, Z"
-    This gets stored as graph_context field and embedded alongside content
+## Prompt 3 — Tail-preserving message truncation
 
-New pgvector schema additions:
-- related_concepts: list[str]  ← OKF semantic links
-- graph_context: str           ← Combined hierarchy + semantic links
-- okf_converted: bool          ← Flag for converted pages
-- okf_file_path: str           ← Path to local OKF file
+```
+This code truncates log messages with a head slice, keeping only the first N characters.
+For stack traces and nested error payloads the actual cause is at the END of the string,
+so head truncation systematically discards the most diagnostic part.
 
-### 4. Enhanced Retriever (retriever_enhanced.py)
+Replace it with a helper that preserves both ends:
+- keep the first ~60% of the budget
+- keep the last ~40%
+- join with a clear elision marker showing how many characters were dropped
+- if the message is under the budget, return it unchanged
 
-Extend current retrieval with graph expansion:
+Apply this helper everywhere messages are truncated before being sent to the LLM.
+Add unit tests covering: under-budget passthrough, exact-budget boundary, and a long
+string where a marker at the very end must survive. Show the diff and tests.
+```
 
-After initial hybrid retrieval (keep existing BM25 + vector logic):
+---
 
-Step 3 — Graph Expansion (NEW):
-- For each of top-3 retrieved chunks:
-  - Fetch chunks whose title matches any item in related_concepts
-  - Fetch chunks whose title matches any item in ancestor_titles
-  - Add fetched chunks to candidate pool with a graph_boost score of +0.05
-- Deduplicate by chunk id
-- Re-run existing reranking logic on expanded pool
-- Cap final results at 5 sources (existing behavior)
+## Prompt 4 — Contract consistency between finding type and finding body
 
-The graph expansion must:
-- Have a max_expansion_depth of 1 (only follow direct links, not recursive)
-- Be bounded: max 10 additional chunks added via expansion
-- Be fast: use a single IN query to pgvector, not N+1 queries
-- Fall back gracefully if related_concepts is empty
+```
+In this code, a categorical "finding type" field is set to its strongest value based
+purely on overall status, without checking that the corresponding finding text was
+actually produced. So the output can claim it has a root cause while the root cause
+field is empty.
 
-### 5. Updated Ingestion Pipeline (ingestion_pipeline.py)
+Downstream consumers gate their rendering on the text field being non-empty, so these
+records render as nothing at all — a failed run with no explanation shown.
 
-Wire everything together:
+Fix the contract so the two fields cannot disagree:
+1. Only assign the strongest finding type when the finding text is actually present.
+2. When status indicates failure but no finding text was produced, emit an explicit
+   "undetermined" state carrying a short machine-readable reason.
+3. Add a validator on the model that rejects the inconsistent combination outright.
+4. Add tests for: failure with text, failure without text, and success without text.
 
-class ATLASIngestionPipeline:
-  def ingest(space_keys, force_reconvert=False):
-    1. Fetch raw pages from Confluence (existing logic)
-    2. OKF conversion — skip if already converted unless force_reconvert=True
-    3. OKF-aware chunking
-    4. Graph enrichment (ancestor_titles + related_concepts)
-    5. Embedding generation (existing Azure OpenAI text-embedding-3-large)
-    6. Upsert to pgvector with new schema fields
-    7. Update Elasticsearch index with new chunk content
+Show the diff and tests.
+```
 
-  Print summary at end:
-  - Pages fetched, Pages converted, Chunks created
-  - Estimated conversion cost ($)
-  - Pages failed (list titles)
-  - Time taken
+---
 
-### 6. Benchmark Runner (benchmark_runner.py)
+## Prompt 5 — Evaluator and bounded repair loop
 
-Run the existing 50-question benchmark and compare:
+```
+This pipeline makes a single LLM call to produce a root-cause analysis and accepts the
+result as-is. There is no verification that the analysis is grounded in the evidence
+that was actually provided, and no retry.
 
-class BenchmarkRunner:
-  def run(retriever, questions_file="benchmark_questions.json"):
-    - Load 50 Q&A pairs from benchmark_questions.json
-    - For each question: retrieve chunks, check if correct answer source 
-      is in top-5 results
-    - Track: accuracy, recall@1, recall@3, recall@5
-    - Track: mean confidence score, mean retrieval latency
-    - Output comparison table:
-      | Metric        | Before OKF | After OKF | Delta |
-      |---------------|------------|-----------|-------|
-      | Accuracy      | 92%        | ?         | ?     |
-      | Recall@3      | ?          | ?         | ?     |
-      | Mean Conf     | ?          | ?         | ?     |
-      | Mean Latency  | ?          | ?         | ?     |
-    - Save results to benchmark_results_{timestamp}.json
+Add an evaluate-then-repair loop with these properties:
 
-## File Structure to Create
+1. EVALUATE: after the analysis returns, score it against the input evidence. Check that
+   every component name, error identifier, and numeric claim it cites actually appears in
+   the context that was sent. Produce a 0-1 grounding score plus a list of unsupported
+   claims.
+2. REPAIR: if the score is below threshold, retry ONCE with the critique injected into
+   the prompt. Do not resend the raw bulk evidence on the retry — reuse the already
+   built context string.
+3. BOUND: cap total iterations at 2. Never loop silently.
+4. FALLBACK: if still below threshold after the retry, return the best result but mark
+   it low-confidence with the specific unsupported claims attached. Never silently drop
+   it and never present it as confident.
+5. INSPECTABLE: log which branch fired, the score at each iteration, and why.
 
-atlas/
-├── okf/
-│   ├── __init__.py
-│   ├── okf_converter.py        ← New
-│   ├── okf_chunker.py          ← New  
-│   ├── graph_enricher.py       ← Extended
-│   └── okf_knowledge_base/     ← Local OKF Markdown files
-├── retrieval/
-│   ├── retriever_enhanced.py   ← Extended (keep original as retriever.py)
-├── ingestion/
-│   ├── ingestion_pipeline.py   ← Extended
-├── eval/
-│   ├── benchmark_runner.py     ← New
-└── failed_conversions.json     ← Auto-generated
+Also estimate the added latency and token cost per run.
 
-## Implementation Order
+Show the implementation and tests covering: passes first try, passes after repair,
+fails both and is surfaced as low-confidence.
+```
 
-Do this in order, verifying each step before moving to the next:
+---
 
-1. okf_converter.py — test on 3 sample Confluence pages first
-2. okf_chunker.py — unit test with sample OKF Markdown
-3. graph_enricher.py — verify related_concepts extraction with regex tests
-4. pgvector schema migration — ADD COLUMNS, do not drop existing
-5. ingestion_pipeline.py — run on 1 Confluence space first (smallest)
-6. retriever_enhanced.py — A/B test against existing retriever
-7. benchmark_runner.py — run full benchmark comparison
+## Prompt 6 — Keyword-based intent classification is too narrow
 
-## Hard Requirements
+```
+This function decides a query's intent by substring-matching against a keyword list,
+and that intent later controls whether the LLM is instructed to produce a root cause
+at all. Queries that clearly ask for a cause but avoid the listed keywords get
+classified as exploratory, and the prompt then tells the model to omit the root cause.
 
-- NEVER drop or modify existing columns in pgvector — only ADD new ones
-- NEVER remove the BM25 + vector hybrid logic — only extend it
-- NEVER remove ancestor_titles — add related_concepts alongside it
-- All new code must have type hints
-- All classes must have docstrings
-- Log every Azure OpenAI call with tokens used and cost
-- Use existing Azure OpenAI client configuration — do not create new clients
-- Use existing pgvector connection pool — do not create new connections
-- Temperature=0 for OKF conversion (deterministic)
-- Temperature=0 for all structured extraction
+Do the following:
+1. Expand the keyword list to cover cause-seeking phrasing: direct requests for a root
+   cause or RCA, "why", negations like "never" / "did not" / "unable" / "no response",
+   timeout and rejection language, and "what went wrong".
+2. Remove redundant entries already covered by substring matching of a shorter stem.
+3. Add a fallback: if the query contains an interrogative asking for causation, classify
+   as cause-seeking regardless of keyword hits.
+4. Decouple safety: even in exploratory mode, the prompt should never be instructed to
+   suppress a root cause when the run's status indicates failure.
 
-## Environment Variables (already set, just use them)
-- AZURE_OPENAI_ENDPOINT
-- AZURE_OPENAI_KEY  
-- AZURE_OPENAI_DEPLOYMENT_GPT4O
-- AZURE_OPENAI_DEPLOYMENT_GPT4O_MINI
-- AZURE_OPENAI_DEPLOYMENT_EMBEDDING
-- POSTGRES_CONNECTION_STRING
-- ELASTICSEARCH_URL
-- CONFLUENCE_BASE_URL
-- CONFLUENCE_PAT
+Add a parametrized test with at least 12 realistic phrasings and their expected
+classification. Show the diff and tests.
+```
 
-## Success Criteria
-- OKF converts all 4,800+ chunks worth of pages without errors
-- related_concepts extracted for at least 60% of pages
-- Benchmark accuracy >= 94% (up from 92%)
-- Graph expansion adds relevant chunks in at least 30% of queries
-- No regression on existing passing tests
-- Ingestion pipeline runs end-to-end on all 6 spaces
+---
 
-Start with Step 1: create okf/okf_converter.py and test it on 3 pages.
-Show me the output OKF Markdown before proceeding to Step 2.
+## Prompt 7 — Silent empty states in the UI
+
+```
+This component renders a finding block only when the finding text is truthy, and there
+is no else branch anywhere in the codebase. Every upstream failure mode therefore
+renders as absence, which is indistinguishable to the user from "nothing was wrong."
+
+Add explicit empty states:
+1. When status indicates a failure but no finding text exists, render an "undetermined"
+   card showing the reason, styled as a warning rather than an error.
+2. When the analysis step itself failed, render a distinct "analysis unavailable" state
+   with a retry affordance.
+3. When a result is marked low-confidence, render it with a visible confidence indicator
+   rather than presenting it as definitive.
+
+Show the updated component.
+```
+
+---
+
+## Prompt 8 — Deduplicate a repeated UI block
+
+```
+The same semantic element is implemented three separate times across this codebase, in
+three different styling approaches — one utility-class-first, one mixed, one inline-style
+first. Only one of the three applies text formatting for readability, so identical content
+renders well in one place and as an unbroken block in the others.
+
+Extract a single shared component that:
+- takes the finding text, the finding type, and a confidence level as props
+- applies the readability formatting in all cases
+- uses design tokens only, no hardcoded color values
+- handles the empty and low-confidence states from the previous prompt
+
+Replace all three call sites with it. Show the new component and the three diffs.
+```
+
+---
+
+## Suggested order
+
+Run 1 first and measure before doing anything else — it is one line and may account for
+a large share of the error. Then 2, 3, 6 (all contained and independently testable),
+then 4 and 7 together, then 5, then 8.
+
+Measure accuracy on a fixed benchmark set after each step so you know which change
+actually moved the number.
+
+## A note on the target
+
+Expect a well-tuned version of this to land in the high-80s to low-90s on clear-signal
+cases, not 100%. Some inputs have genuinely ambiguous evidence and some have no causal
+signal present at all. The more valuable goal is calibration: be right most of the time
+and reliably know when you are not, so that uncertain results are labeled rather than
+asserted. Prompt 5 is what buys that.
