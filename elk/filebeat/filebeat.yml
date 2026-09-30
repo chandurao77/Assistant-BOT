@@ -1,0 +1,51 @@
+# =============================================================================
+# Filebeat Configuration — Assistant Bot
+# =============================================================================
+# Collects logs from all containers and ships them to Logstash.
+# Auto-discovers containers via Podman-compatible Docker API.
+# =============================================================================
+
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      hints.enabled: true
+      # Only collect logs from Assistant Bot containers
+      templates:
+        - condition:
+            or:
+              - contains:
+                  docker.container.name: "confluence-"
+          config:
+            - type: container
+              paths:
+                - /var/lib/docker/containers/${data.docker.container.id}/*.log
+              # Parse multiline stack traces (Python)
+              multiline.type: pattern
+              multiline.pattern: '^[[:space:]]+(File|Traceback|at )'
+              multiline.negate: false
+              multiline.match: after
+
+# ── Processors ──────────────────────────────────────────────────────────────
+processors:
+  - add_docker_metadata:
+      host: "unix:///var/run/docker.sock"  # mapped from podman.sock in compose
+  - add_cloud_metadata: ~
+
+  # Drop noisy health check logs to save storage
+  - drop_event:
+      when:
+        or:
+          - contains:
+              message: "GET /api/health"
+          - contains:
+              message: "GET / HTTP"
+          - contains:
+              message: "redis-cli ping"
+
+# ── Output to Logstash ──────────────────────────────────────────────────────
+output.logstash:
+  hosts: ["logstash:5044"]
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging.level: warning
+logging.to_stderr: true

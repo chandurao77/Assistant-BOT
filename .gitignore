@@ -1,0 +1,62 @@
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+secrets/*
+!secrets/README.md
+!secrets/.gitignore
+
+# TLS certificates — never commit
+certs/
+
+# Backups — contain database dumps (potentially sensitive data)
+backups/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+.venv*/
+venv/
+temp-*/
+
+# Office / binary presentation files
+*.ppt
+*.pptx
+*.pdf
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Container volumes / local data
+backend/data/
+*.db
+*.db-wal
+*.db-shm
+*.db.bak*
+# One-off debug/diagnostic scripts
+debug_okf*.py
+check_pages.py
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+update_ppt.py
+
+# Local tooling state
+.code-review-graph/
+.devin/
+okf_knowledge_base/
+failed_conversions.json

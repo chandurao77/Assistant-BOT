@@ -1,0 +1,28 @@
+# Dependencies (re-installed during build)
+node_modules
+
+# Build output
+dist
+.vite
+
+# Version control
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Docs
+*.md
+LICENSE
+
+# Environment
+.env
+.env.*
+
+# Tests (not needed in production image)
+src/**/*.test.*
+vitest.config.*

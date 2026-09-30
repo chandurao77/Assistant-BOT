@@ -1,0 +1,49 @@
+# Assistant Bot Ingestion Worker — background job processor
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest-worker
+  namespace: assistant-bot
+  labels:
+    app: ingest-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ingest-worker
+  template:
+    metadata:
+      labels:
+        app: ingest-worker
+    spec:
+      containers:
+        - name: worker
+          image: assistant-bot-backend:latest
+          command: ["python", "-m", "app.services.ingest_worker"]
+          envFrom:
+            - configMapRef:
+                name: assistant-bot-config
+            - secretRef:
+                name: assistant-bot-secrets
+          env:
+            - name: QDRANT_HOST
+              value: qdrant
+            - name: REDIS_ENABLED
+              value: "true"
+            - name: REDIS_URL
+              value: "redis://redis:6379/0"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: secrets-volume
+              mountPath: /run/secrets
+              readOnly: true
+      volumes:
+        - name: secrets-volume
+          secret:
+            secretName: assistant-bot-file-secrets

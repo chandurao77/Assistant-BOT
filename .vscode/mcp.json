@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "assistant-bot-search": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["${workspaceFolder}/mcp_stdio_proxy.py"],
+      "env": {
+        "ASSISTANT_BOT_API_URL": "http://localhost:8000"
+      }
+    }
+  }
+}

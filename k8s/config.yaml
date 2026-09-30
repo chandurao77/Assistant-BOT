@@ -1,0 +1,50 @@
+# Assistant Bot ConfigMap — non-secret configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: assistant-bot-config
+  namespace: assistant-bot
+data:
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+  QDRANT_HOST: "qdrant"
+  QDRANT_PORT: "6333"
+  REDIS_ENABLED: "true"
+  REDIS_URL: "redis://redis:6379/0"
+  RATE_LIMIT_ENABLED: "true"
+  RATE_LIMIT_RPM: "60"
+  SEMANTIC_CACHE_ENABLED: "true"
+  CONTENT_GUARDRAIL_ENABLED: "true"
+  RERANK_ENABLED: "true"
+  # OIDC / SSO
+  OIDC_ENABLED: "false"
+  # Uvicorn workers (per pod)
+  WEB_CONCURRENCY: "4"
+---
+# Assistant Bot Secrets — sensitive values (base64-encoded)
+# In production, use External Secrets Operator or Sealed Secrets
+apiVersion: v1
+kind: Secret
+metadata:
+  name: assistant-bot-secrets
+  namespace: assistant-bot
+type: Opaque
+stringData:
+  JWT_SECRET: "CHANGE-ME-to-a-strong-random-value"
+  DATABASE_URL: "postgresql+asyncpg://assistant_bot:assistant_bot@postgres:5432/assistant_bot"
+  CONFLUENCE_BASE_URL: ""
+  CONFLUENCE_EMAIL: ""
+  CONFLUENCE_API_TOKEN: ""
+  OIDC_CLIENT_ID: ""
+  OIDC_CLIENT_SECRET: ""
+  OIDC_ISSUER_URL: ""
+---
+# File-based secrets (mounted at /run/secrets/)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: assistant-bot-file-secrets
+  namespace: assistant-bot
+type: Opaque
+stringData:
+  jwt_secret: "CHANGE-ME-to-a-strong-random-value"
